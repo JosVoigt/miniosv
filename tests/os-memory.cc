@@ -1881,12 +1881,14 @@ void libc_mmap()
         }
     }
 
-    test("a mapping spends its memory at once and gives it back");
+    test("a mapping spends its memory when touched and gives it back");
     {
         const size_t size = 64ul << 20;
         size_t before = fr::free_bytes();
         char *p = static_cast<char *>(anon(size));
         CHECK(p != nullptr);
+        CHECK(before - fr::free_bytes() < size / 2);
+        memset(p, 1, size);
         CHECK(before - fr::free_bytes() >= size);
         CHECK(munmap(p, size) == 0);
         CHECK(fr::free_bytes() + (1ul << 20) >= before);

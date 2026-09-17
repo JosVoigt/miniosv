@@ -143,7 +143,7 @@ namespace pthread_private {
         }
         size_t size = attr.stack_size;
         void *addr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
         if (addr == MAP_FAILED) {
             throw std::bad_alloc();
         }

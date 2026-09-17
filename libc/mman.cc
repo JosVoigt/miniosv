@@ -17,6 +17,7 @@
 #include "libc/libc.hh"
 #include <safe-ptr.hh>
 #include <atomic>
+#include <cstring>
 #include <osv/kernel_config.h>
 
 #ifndef MAP_UNINITIALIZED
@@ -50,9 +51,30 @@ static bool page_aligned(const void *p)
     return !(reinterpret_cast<uintptr_t>(p) & (mem::mapping::page_size - 1));
 }
 
-// Anonymous memory: a reservation of its own, mapped eagerly. The ops mark
-// tells these apart from every other reservation.
-static const mem::vspace::region_ops anon_ops = { .fault = nullptr };
+// Anonymous memory: a reservation of its own, backed on first touch.
+// jemalloc reserves address space geometrically and gives ranges back with
+// madvise, both of which only work if a reservation costs nothing until used.
+static size_t anon_leaf(mem::range s)
+{
+    constexpr size_t huge = mem::mapping::huge_page_size;
+    return (s.start % huge == 0 && s.size() % huge == 0) ? huge : mem::mapping::page_size;
+}
+
+static bool mapped(uintptr_t addr)
+{
+    auto e = mem::mapping::find(addr);
+    return e && e.present();
+}
+
+static bool anon_fault(mem::vspace::region &r, uintptr_t addr, unsigned)
+{
+    size_t leaf = anon_leaf(r.span);
+    uintptr_t base = align_down(addr, leaf);
+    // Losing the race to another cpu leaves the leaf mapped, which is as good.
+    return mem::mapping::populate({base, base + leaf}, r.perm, leaf) || mapped(addr);
+}
+
+static const mem::vspace::region_ops anon_ops = { .fault = anon_fault };
 
 static mem::vspace::region *anon_at(const void *addr)
 {
@@ -60,7 +82,7 @@ static mem::vspace::region *anon_at(const void *addr)
     return r && r->ops == &anon_ops ? r : nullptr;
 }
 
-static void *anon_map(size_t length, unsigned perm)
+static void *anon_map(size_t length, unsigned perm, bool eager)
 {
     // Huge leaves once there is enough to fill one.
     size_t leaf = length >= mem::mapping::huge_page_size ?
@@ -76,7 +98,7 @@ static void *anon_map(size_t length, unsigned perm)
         delete r;
         return nullptr;
     }
-    if (!mem::mapping::populate(r->span, perm, leaf)) {
+    if (eager && !mem::mapping::populate(r->span, perm, leaf)) {
         mem::mapping::depopulate(r->span);
         mem::vspace::release(*r);
         delete r;
@@ -158,7 +180,8 @@ void *mmap(void *addr, size_t length, int prot, int flags,
         trace_memory_mmap_err(errno);
         return MAP_FAILED;
     }
-    ret = anon_map(length, mmap_perm);
+    // Stacks stay eager: the kernel has no lazy-stack support.
+    ret = anon_map(length, mmap_perm, flags & (MAP_POPULATE | MAP_STACK));
     if (!ret) {
         errno = ENOMEM;
         trace_memory_mmap_err(errno);
@@ -212,14 +235,34 @@ int msync(void *addr, size_t length, int flags)
     return 0;
 }
 
-// Nothing is given back: the frames under a mapping belong to it until it is
-// unmapped. MADV_DONTNEED is accepted and does nothing.
+// DONTNEED and FREE drop whole leaves and zero the rest, so the range reads
+// as zero afterwards either way, which is what jemalloc's purge assumes.
 OSV_LIBC_API
 int madvise(void *addr, size_t length, int advice)
 {
-    if (!anon_at(addr)) {
+    auto *r = anon_at(addr);
+    uintptr_t start = reinterpret_cast<uintptr_t>(addr);
+    if (!r || !r->span.contains({start, start + length})) {
         errno = ENOMEM;
         return -1;
+    }
+    if (advice != MADV_DONTNEED && advice != MADV_FREE) {
+        return 0;
+    }
+    size_t leaf = anon_leaf(r->span);
+    uintptr_t end = start + length;
+    uintptr_t lo = align_up(start, leaf), hi = align_down(end, leaf);
+    auto zero = [](uintptr_t a, uintptr_t b) {
+        if (a < b && mapped(a)) {
+            memset(reinterpret_cast<void *>(a), 0, b - a);
+        }
+    };
+    if (lo < hi) {
+        mem::mapping::depopulate({lo, hi});
+        zero(start, lo);
+        zero(hi, end);
+    } else {
+        zero(start, end);
     }
     return 0;
 }
