@@ -124,14 +124,20 @@ int mprotect(void *addr, size_t len, int prot)
     }
 
     // Only a mapping this made can be reprotected: anything else shares its
-    // pages with the allocation next to it.
+    // pages with the allocation next to it. And only whole, like munmap: the
+    // permission lives on the region, where the fault path reads it for a
+    // page not backed yet, and a region cannot be split.
     len = align_up(len, mem::mapping::page_size);
     uintptr_t start = reinterpret_cast<uintptr_t>(addr);
     auto *r = anon_at(addr);
     if (!r || !r->span.contains({start, start + len})) {
         return libc_error(ENOMEM);
     }
-    mem::mapping::protect({start, start + len}, libc_prot_to_perm(prot));
+    if (r->span.start != start || r->span.end != start + len) {
+        return libc_error(EINVAL);
+    }
+    r->perm = libc_prot_to_perm(prot);
+    mem::mapping::protect(r->span, r->perm);
     return 0;
 }
 
