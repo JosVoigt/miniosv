@@ -1469,7 +1469,7 @@ void capability_limit_and_policy()
         CHECK(g_spy.helpers_ok.load());
         CHECK(g_spy.faults.load() >= int(bytes / ragged_span) / 2);
         CHECK(g_spy.evicted.load() > 0);
-        CHECK(g_spy.victims_max.load() == 64);
+        CHECK(g_spy.victims_max.load() == 512); // reclaim.cc's victims_max
         // Touched buffers read as accessed by the time they are evicted.
         CHECK(g_spy.accessed_at_evict.load() > 0);
         pc::unmap(b);
