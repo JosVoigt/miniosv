@@ -13,6 +13,7 @@
 #   - os-iostream  : C++ iostreams / localization checks (std::cout etc.)
 #   - os-memmove   : memmove() overlap-correctness regression test
 #   - os-stress    : concurrency / allocator / TLS stress tests
+#   - os-perf      : osv/perf.hh on the hardware counters (skipped without a PMU)
 
 app-objects =  test/osv_tests.o
 app-objects += test/os-features.o
@@ -20,3 +21,4 @@ app-objects += test/os-libc.o
 app-objects += test/os-iostream.o
 app-objects += test/os-memmove.o
 app-objects += test/os-stress.o
+app-objects += test/os-perf.o
