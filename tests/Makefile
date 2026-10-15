@@ -16,6 +16,7 @@
 #   - os-memory    : the memory clients: early, heap, page cache, plus malloc/mmap
 #   - os-memory-primitives : vspace, frames and mapping, one header per function
 #   - os-stress    : concurrency / allocator / TLS stress tests
+#   - os-perf      : osv/perf.hh on the hardware counters (skipped without a PMU)
 #   - os-miniext   : miniext filesystem checks, only when conf_fs_miniext=1
 #                    (needs --emulated-nvme at run time; skips without)
 
@@ -28,6 +29,7 @@ app-objects += tests/os-string.o
 app-objects += tests/os-memory.o
 app-objects += tests/os-memory-primitives.o
 app-objects += tests/os-stress.o
+app-objects += tests/os-perf.o
 ifeq ($(conf_fs_miniext),1)
 app-objects += tests/os-miniext.o
 endif

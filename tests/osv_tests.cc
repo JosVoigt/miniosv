@@ -30,6 +30,7 @@ int os_memmove_main();
 int os_string_main();
 int os_memory_main();
 int os_memory_primitives_main();
+int os_perf_main();
 #if CONF_fs_miniext
 int os_miniext_main();
 #endif
@@ -56,6 +57,7 @@ const suite suites[] = {
 	{"miniext",  os_miniext_main,  "miniext filesystem (needs --emulated-nvme)"},
 #endif
 	{"stress",   os_stress_main,   "concurrency and allocator stress"},
+	{"perf",     os_perf_main,     "osv/perf.hh on the hardware counters"},
 };
 
 const suite *find_suite(const std::string &name)
