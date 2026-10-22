@@ -15,6 +15,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -39,6 +40,46 @@ struct PMCEvent {
 // this because it's used by the arch-neutral PMCSelectCore workaround.
 inline constexpr uint32_t midr_neoverse_v1 = 0x410F'D400u;
 
+// RAPL energy domains. The vendors don't line up, so each domain means one
+// thing and reads NaN where it doesn't exist:
+//   PKG   - the whole package (AMD, Intel)
+//   CORE  - the physical core of the calling cpu (AMD only)
+//   CORES - all cores of the package together, Intel's PP0 (Intel only)
+//   DRAM  - memory attached to the package (Intel, where present)
+// Under KVM nothing is virtualized: PKG includes the host and other VMs, and
+// CORE is that of the physical cpu the vCPU runs on.
+enum class EnergyDomain { PKG, CORE, CORES, DRAM };
+
+// CPPC abstract performance levels (0-255), as in ACPI CPPC. Intel's HWP
+// levels map onto them: guaranteed -> nominal, most efficient ->
+// lowest_nonlinear.
+struct CppcCaps {
+  uint8_t highest;
+  uint8_t nominal;
+  uint8_t lowest_nonlinear;
+  uint8_t lowest;
+};
+
+// A CPPC performance request. desired = 0 lets the hardware pick between min
+// and max, guided by epp (0 = performance, 255 = energy saving).
+struct CppcRequest {
+  uint8_t max;
+  uint8_t min;
+  uint8_t desired;
+  uint8_t epp;
+
+  bool operator==(const CppcRequest &) const = default;
+};
+
+// Temperature sensors, read as absolute degrees Celsius; NaN where the sensor
+// doesn't exist. As with energy, the vendors don't line up:
+//   PKG  - AMD Tctl, Intel package temperature
+//   CORE - the physical core of the calling cpu (Intel only; AMD has no
+//          per-core sensors, only per CCD, see temperature_ccd())
+// A guest only has them when the host provides them: smn_passthrough.ko on
+// AMD, thermal MSR passthrough on Intel.
+enum class TempDomain { PKG, CORE };
+
 } // namespace perf
 
 // Arch back-end provides:
@@ -46,6 +87,10 @@ inline constexpr uint32_t midr_neoverse_v1 = 0x410F'D400u;
 //   - enable_pmu, pmu_num_counters, pmc_overflow_width, pmu_design_id, is_midr
 //   - x86 only: cpu_vendor, is_intel, is_amd
 //   - namespace perf::PERF_COUNT_HW event catalogue
+//   - rapl_available, rapl_energy_unit, rapl_read, rapl_counter_width
+//   - cppc_available, cppc_read_caps, cppc_read_request, cppc_write_request
+//     (CPPC on AMD, HWP on Intel; stubs reporting "not available" on ARM)
+//   - temperature, temperature_ccd_mask, temperature_ccd (NaN / 0 on ARM)
 #include <arch-perf.hh>
 
 namespace perf {
@@ -492,6 +537,134 @@ private:
   bool counted_wraps = false;
 };
 
+// Energy used in one RAPL domain between start() and stop(), in joules; NaN
+// where the domain doesn't exist (see EnergyDomain). Unlike an Event it takes
+// no counter: the RAPL counters always run. They are 32 bits wide and wrap
+// after tens of kJ (about an hour at 15 W in the usual 15.3 uJ unit); stop()
+// catches one wrap, poll() more often than that catches the rest.
+struct EnergyEvent {
+  EnergyDomain domain;
+  const char *name;
+
+  EnergyEvent(EnergyDomain domain, const char *name)
+      : domain(domain), name(name) {}
+
+  void start() {
+    valid = rapl_available(domain) && rapl_read(domain, before);
+    if (!valid)
+      return;
+    unit = rapl_energy_unit(domain);
+    cpu = sched::cpu::current()->id;
+    last = before;
+    wraps = 0;
+  }
+
+  void poll() {
+    uint64_t now;
+    if (!valid)
+      return;
+    // A per-core counter read on another cpu is another core's.
+    if (domain == EnergyDomain::CORE && sched::cpu::current()->id != cpu) {
+      valid = false;
+      return;
+    }
+    if (!rapl_read(domain, now))
+      return;
+    if (now < last)
+      ++wraps;
+    last = now;
+  }
+
+  void stop() {
+    poll();
+    after = last;
+  }
+
+  double report() const {
+    if (!valid)
+      return NAN;
+    return static_cast<double>((wraps << rapl_counter_width) + after - before) *
+           unit;
+  }
+
+private:
+  bool valid = false;
+  double unit = NAN;
+  unsigned cpu = 0;
+  uint64_t before = 0;
+  uint64_t after = 0;
+  uint64_t last = 0;
+  uint64_t wraps = 0;
+};
+
+// ---------------- DVFS: CPPC (AMD) / HWP (Intel) ----------------
+//
+// Performance requests of the calling cpu. Under KVM they are those of the
+// physical cpu the vCPU runs on, so vCPUs have to be pinned 1:1 for this to
+// mean anything, and a request stays in effect there after the vCPU stops
+// until the host restores its own (dvfs_passthrough: enable=0 or unload).
+
+// Nullopt also when the capabilities make no sense: firmware can report all
+// zeroes (seen on a laptop running on battery), and a request built from
+// those would ask for nothing at all.
+inline std::optional<CppcCaps> cppc_caps() {
+  CppcCaps caps;
+  if (!cppc_available() || !cppc_read_caps(caps))
+    return std::nullopt;
+  if (!caps.highest || caps.lowest > caps.lowest_nonlinear ||
+      caps.lowest_nonlinear > caps.nominal || caps.nominal > caps.highest)
+    return std::nullopt;
+  return caps;
+}
+
+inline std::optional<CppcRequest> cppc_request() {
+  CppcRequest req;
+  if (!cppc_available() || !cppc_read_request(req))
+    return std::nullopt;
+  return req;
+}
+
+inline bool cppc_set_request(const CppcRequest &req) {
+  return cppc_available() && cppc_write_request(req);
+}
+
+// Holds a request for its lifetime and puts the previous one back. Keeps the
+// thread on its cpu meanwhile, because the request belongs to that cpu.
+struct CppcScope {
+  explicit CppcScope(const CppcRequest &req) { apply(req, false); }
+
+  // Run at a fixed level: min = max = desired, EPP left as it is.
+  explicit CppcScope(uint8_t level) {
+    apply({level, level, level, 0}, true);
+  }
+
+  ~CppcScope() {
+    if (active)
+      cppc_set_request(saved);
+    sched::migrate_enable();
+  }
+
+  CppcScope(const CppcScope &) = delete;
+  CppcScope &operator=(const CppcScope &) = delete;
+
+  // The request was applied.
+  bool ok() const { return active; }
+
+private:
+  void apply(CppcRequest req, bool keep_epp) {
+    sched::migrate_disable();
+    if (auto old = cppc_request()) {
+      saved = *old;
+      if (keep_epp)
+        req.epp = old->epp;
+      active = cppc_set_request(req);
+    }
+  }
+
+  CppcRequest saved{};
+  bool active = false;
+};
+
 struct PerfEvent {
   // The machine-wide selection unless an external one is supplied. Sharing a
   // PMCSelect between PerfEvents lets multiple collections coordinate uncore
@@ -499,6 +672,12 @@ struct PerfEvent {
   PMCSelect &pmcs = default_core_pmcs();
   // Must not exceed the number of hardware counters in `pmcs`.
   std::vector<Event> events;
+  // Always all domains, so that reports have the same columns everywhere;
+  // the ones this machine doesn't have read NaN.
+  std::vector<EnergyEvent> energy{{EnergyDomain::PKG, "energy-pkg-J"},
+                                  {EnergyDomain::CORE, "energy-core-J"},
+                                  {EnergyDomain::CORES, "energy-cores-J"},
+                                  {EnergyDomain::DRAM, "energy-dram-J"}};
 
   std::chrono::time_point<std::chrono::steady_clock> startTime;
   std::chrono::time_point<std::chrono::steady_clock> stopTime;
@@ -533,6 +712,8 @@ struct PerfEvent {
     pmcs.enable_wrap_counting();
     for (auto &event : events)
       event.start();
+    for (auto &e : energy)
+      e.start();
     startTime = std::chrono::steady_clock::now();
   }
 
@@ -544,10 +725,14 @@ struct PerfEvent {
   void pollCounters() {
     for (auto &event : events)
       event.poll();
+    for (auto &e : energy)
+      e.poll();
   }
 
   void stopCounters() {
     stopTime = std::chrono::steady_clock::now();
+    for (auto &e : energy)
+      e.stop();
     for (auto &event : events)
       event.stop();
   }
@@ -574,6 +759,26 @@ struct PerfEvent {
       if (event.pmce.name == name)
         return event.report();
     return -1;
+  }
+
+  // Joules, NaN where the domain doesn't exist.
+  double getEnergy(EnergyDomain domain) const {
+    for (const auto &e : energy)
+      if (e.domain == domain)
+        return e.report();
+    return NAN;
+  }
+
+  // Average watts over the measurement.
+  double getPower(EnergyDomain domain) const {
+    return getEnergy(domain) / getDuration();
+  }
+
+  // Joules are small numbers; the default two decimals would round them away.
+  static std::string formatEnergy(double joules) {
+    std::stringstream stream;
+    stream << std::fixed << std::setprecision(6) << joules;
+    return stream.str();
   }
 
   static void printCounter(std::ostream &headerOut, std::ostream &dataOut,
@@ -614,10 +819,16 @@ struct PerfEvent {
                    event.report() / static_cast<double>(normalizationConstant));
     }
 
+    // Totals: energy isn't per element like the events above.
+    for (const auto &e : energy)
+      printCounter(headerOut, dataOut, e.name, formatEnergy(e.report()));
+
     printCounter(headerOut, dataOut, "scale", normalizationConstant);
 
     // Derived metrics.
     printCounter(headerOut, dataOut, "IPC", getIPC());
+    printCounter(headerOut, dataOut, "power-pkg-W",
+                 getPower(EnergyDomain::PKG));
   }
 
   template <typename T>
@@ -640,12 +851,16 @@ struct PerfEvent {
     if (events.empty())
       return;
 
-    // Widest event name; minimum width is that of "scale".
-    int eNameWidth = 5;
+    // Widest event name; minimum width is that of "power-pkg-W".
+    int eNameWidth = 11;
     for (const auto &event : events) {
       eNameWidth = std::max(
           static_cast<int>(std::char_traits<char>::length(event.pmce.name)),
           eNameWidth);
+    }
+    for (const auto &e : energy) {
+      eNameWidth = std::max(
+          static_cast<int>(std::char_traits<char>::length(e.name)), eNameWidth);
     }
 
     printCounterVertical(infoOut, "duration", getDuration(), eNameWidth);
@@ -656,10 +871,16 @@ struct PerfEvent {
                            eNameWidth);
     }
 
+    for (const auto &e : energy)
+      printCounterVertical(infoOut, e.name, formatEnergy(e.report()),
+                           eNameWidth);
+
     printCounterVertical(infoOut, "scale", normalizationConstant, eNameWidth);
 
     // Derived metrics.
     printCounterVertical(infoOut, "IPC", getIPC(), eNameWidth);
+    printCounterVertical(infoOut, "power-pkg-W", getPower(EnergyDomain::PKG),
+                         eNameWidth);
   }
 };
 

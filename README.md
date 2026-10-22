@@ -43,6 +43,67 @@ directory holding a Makefile that sets `$(app-objects)`, in this tree or out of 
 also own the build: [miniduckdb](https://github.com/TUM-DSE/miniduckdb) keeps this repository as a
 submodule under `kernel/` and runs this Makefile with `app=` pointing back at itself.
 
+## Energy, DVFS and temperature (RAPL / CPPC)
+
+`include/osv/perf.hh` extends the hardware-counter API beyond the PMU with energy readings,
+per-cpu performance requests and temperature sensors. Everything is x86-64 only; on aarch64 the
+backend is a stub that reports "not available" (energy and temperature read NaN, requests are
+refused), so code using it builds and runs unchanged on both arches.
+
+**RAPL energy.** `perf::EnergyEvent` measures the joules used in one `perf::EnergyDomain`
+between `start()` and `stop()`. It needs no PMU counter, since the RAPL counters always run.
+Vendors expose different domains, so each domain has one fixed meaning and reads NaN where it
+doesn't exist:
+
+| Domain  | Meaning                                       | AMD (Zen 2+) | Intel |
+|---------|-----------------------------------------------|:------------:|:-----:|
+| `PKG`   | whole package                                 | ✓            | ✓     |
+| `CORE`  | physical core of the calling cpu              | ✓            |       |
+| `CORES` | all cores of the package together (PP0)       |              | ✓     |
+| `DRAM`  | memory attached to the package                |              | where present |
+
+The counters are 32 bits wide and wrap after tens of kJ: `stop()` catches one wrap, and calling
+`poll()` more often than that catches the rest. Intel server parts that use the fixed 15.3 µJ
+DRAM unit are handled. `perf::PerfEvent` records all four domains alongside its PMU events, so
+reports always have the same `energy-*-J` columns, plus a derived `power-pkg-W`.
+`getEnergy(domain)` and `getPower(domain)` return the values directly.
+
+**CPPC / HWP performance requests.** AMD CPPC and Intel HWP both take a min/max/desired
+performance level and an energy-performance preference (EPP) per cpu, on the same abstract 0–255
+scale. Both are mapped onto `perf::CppcCaps` and `perf::CppcRequest`:
+
+```cpp
+if (auto caps = perf::cppc_caps()) {          // nullopt if unavailable or nonsensical
+    perf::CppcScope fixed(caps->nominal);     // min = max = desired, EPP kept; pins the thread
+    if (fixed.ok()) { /* run at nominal */ }
+}                                             // previous request restored here
+```
+
+`perf::cppc_request()` and `perf::cppc_set_request()` give raw access. `CppcScope` disables
+migration while it is alive, because a request belongs to the cpu it was written on.
+
+**Temperature.** `perf::temperature(TempDomain::PKG | CORE)` returns degrees Celsius (AMD Tctl,
+Intel package or per-core DTS). On AMD, `temperature_ccd_mask()` and `temperature_ccd(n)` read
+the per-CCD sensors.
+
+**Running under KVM.** KVM virtualizes none of this. The guest only sees it when the host passes
+the MSRs through, and every access uses `rdmsr_safe`, so a missing MSR reads as "not available"
+instead of faulting:
+
+- RAPL and CPPC/HWP need the host module `dvfs_passthrough.ko`, loaded before the VM starts.
+  A power unit of 0, which is what KVM returns with `ignore_msrs`, is treated as missing.
+- AMD temperature needs `smn_passthrough.ko`; Intel needs thermal-MSR passthrough.
+- Readings are those of the physical hardware: `PKG` includes the host and other VMs, and
+  `CORE`/CPPC refer to the physical cpu the vCPU runs on. Pin vCPUs 1:1 to host cpus (e.g. via
+  QEMU's thread affinity or `taskset`) for per-core results to make sense. A CPPC request remains in effect on the host cpu
+  after the VM exits, until the host restores its own (`dvfs_passthrough` `enable=0` or unload).
+
+**Tests.** `make app=tests` includes `os-perf`, which checks that RAPL readings are plausible
+where a domain exists and NaN where it doesn't, that per-core energy follows a single busy cpu,
+that the same work runs at three fixed CPPC levels with the clock following and the request
+restored afterwards, and that temperatures are plausible. Finally it runs all cpus hot, then
+cold, and checks that clock, power and temperature follow.
+
 ## License
 
 3-clause BSD (see [`LICENSE`](LICENSE)), inherited from OSv. Includes musl-derived code under the
