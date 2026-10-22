@@ -547,4 +547,20 @@ inline void pmu_dump_state() {
   std::cout << std::dec << std::endl;
 }
 
+// No RAPL or CPPC here: energy reads NaN and requests are refused.
+inline bool rapl_available(EnergyDomain) { return false; }
+inline double rapl_energy_unit(EnergyDomain) { return NAN; }
+inline constexpr uint32_t rapl_counter_width = 32;
+inline bool rapl_read(EnergyDomain, uint64_t &) { return false; }
+
+inline bool cppc_available() { return false; }
+inline bool cppc_read_caps(CppcCaps &) { return false; }
+inline bool cppc_read_request(CppcRequest &) { return false; }
+inline bool cppc_write_request(const CppcRequest &) { return false; }
+
+// No temperature sensors either.
+inline double temperature(TempDomain) { return NAN; }
+inline uint32_t temperature_ccd_mask() { return 0; }
+inline double temperature_ccd(unsigned) { return NAN; }
+
 } // namespace perf

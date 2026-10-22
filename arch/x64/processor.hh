@@ -244,6 +244,30 @@ inline bool wrmsr_safe(u32 index, u64 data) {
     return ret;
 }
 
+// Leaves data alone and returns false if the MSR doesn't exist (#GP).
+inline bool rdmsr_safe(u32 index, u64 &data) {
+    u32 lo = 0, hi = 0;
+
+    bool ret = true;
+    asm volatile ("1: \n\t"
+                  "rdmsr\n\t"
+                  "2: \n\t"
+                  ".pushsection .text.fixup, \"ax\" \n\t"
+                  "3: \n\t"
+                  "xor %[ret], %[ret]\n\t"
+                  "jmp 2b \n\t"
+                  ".popsection \n\t"
+                  ".pushsection .fixup, \"aw\" \n\t"
+                  ".quad 1b, 3b \n\t"
+                  ".popsection\n"
+            :  [ret]"+r"(ret), "+a"(lo), "+d"(hi)
+            : "c"(index));
+
+    if (ret)
+        data = lo | ((u64)hi << 32);
+    return ret;
+}
+
 inline void wrfsbase(u64 data)
 {
     asm volatile("wrfsbase %0" : : "r"(data));
