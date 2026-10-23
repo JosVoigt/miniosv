@@ -96,6 +96,17 @@ enum {
   NVME_FEATURE_ASYNC_EVENT = 0xB,     ///< async event config
 };
 
+/// NVMe log page identifiers
+enum {
+  NVME_LOG_ERROR = 0x1,  ///< error information
+  NVME_LOG_HEALTH = 0x2, ///< SMART / health information
+  NVME_LOG_FW = 0x3,     ///< firmware slot information
+};
+
+/// Namespace id that addresses the controller as a whole (e.g. for the
+/// controller-wide SMART log)
+#define NVME_NSID_ALL 0xFFFFFFFFu
+
 /// Version
 typedef union _nvme_version {
   u32 val; ///< whole value
@@ -477,25 +488,49 @@ typedef struct _nvme_log_page_error {
 } nvme_log_page_error_t;
 
 /// Admin data:  Get Log Page - SMART / Health Information
-typedef struct _nvme_log_page_health {
-  u8 warn;           ///< critical warning
-  u16 temp;          ///< temperature
-  u8 avspare;        ///< available spare
-  u8 avsparethresh;  ///< available spare threshold
-  u8 used;           ///< percentage used
-  u8 rsvd6[26];      ///< reserved (6-31)
-  u64 dur[2];        ///< data units read
-  u64 duw[2];        ///< data units written
+/// The 128-bit counters are kept as two u64, [0] the low half.
+typedef struct __attribute__((packed)) _nvme_log_page_health {
+  u8 warn;           ///< critical warning (bit field, see NVME_HEALTH_WARN_*)
+  u16 temp;          ///< composite temperature (K)
+  u8 avspare;        ///< available spare (%)
+  u8 avsparethresh;  ///< available spare threshold (%)
+  u8 used;           ///< percentage used (may exceed 100)
+  u8 egwarn;         ///< endurance group critical warning summary
+  u8 rsvd7[25];      ///< reserved (7-31)
+  u64 dur[2];        ///< data units read (1000 x 512 bytes)
+  u64 duw[2];        ///< data units written (1000 x 512 bytes)
   u64 hrc[2];        ///< number of host read commands
   u64 hwc[2];        ///< number of host write commands
-  u64 cbt[2];        ///< controller busy time
+  u64 cbt[2];        ///< controller busy time (minutes)
   u64 pcycles[2];    ///< number of power cycles
   u64 phours[2];     ///< power on hours
   u64 unsafeshut[2]; ///< unsafe shutdowns
-  u64 merrors[2];    ///< media errors
+  u64 merrors[2];    ///< media and data integrity errors
   u64 errlogs[2];    ///< number of error log entries
-  u64 rsvd192[320];  ///< reserved (192-511)
+  u32 wctempt;       ///< warning composite temperature time (minutes)
+  u32 cctempt;       ///< critical composite temperature time (minutes)
+  u16 tsen[8];       ///< temperature sensors 1-8 (K, 0 = not implemented)
+  u32 tmt1c;         ///< thermal management temperature 1 transition count
+  u32 tmt2c;         ///< thermal management temperature 2 transition count
+  u32 tttmt1;        ///< total time for thermal management temperature 1 (s)
+  u32 tttmt2;        ///< total time for thermal management temperature 2 (s)
+  u8 rsvd232[280];   ///< reserved (232-511)
 } nvme_log_page_health_t;
+
+static_assert(sizeof(nvme_log_page_health_t) == 512, "SMART log is 512 bytes");
+static_assert(__builtin_offsetof(nvme_log_page_health_t, temp) == 1, "temp");
+static_assert(__builtin_offsetof(nvme_log_page_health_t, dur) == 32, "dur");
+static_assert(__builtin_offsetof(nvme_log_page_health_t, tsen) == 200, "tsen");
+
+/// SMART critical warning bits (nvme_log_page_health_t::warn)
+enum {
+  NVME_HEALTH_WARN_SPARE = 1 << 0,       ///< available spare below threshold
+  NVME_HEALTH_WARN_TEMPERATURE = 1 << 1, ///< temperature out of range
+  NVME_HEALTH_WARN_RELIABILITY = 1 << 2, ///< degraded by media errors
+  NVME_HEALTH_WARN_READ_ONLY = 1 << 3,   ///< media placed in read-only mode
+  NVME_HEALTH_WARN_VOLATILE = 1 << 4,    ///< volatile memory backup failed
+  NVME_HEALTH_WARN_PMR = 1 << 5,         ///< persistent memory region read-only
+};
 
 /// Admin data:  Get Log Page - Firmware Slot Information
 typedef struct _nvme_log_page_fw {

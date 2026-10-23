@@ -11,12 +11,15 @@
  *                  qsort, setjmp, errno, calendar time) (conformance).
  *   - os-stress:   hammers threads, the allocator, TLS, synchronization, files
  *                  and IPC concurrently to shake out races (stress).
+ *   - os-nvme:     NVMe health (SMART log) on every controller the driver
+ *                  found (with conf_drivers_nvme).
  *
  * Both used to be standalone PIE programs with their own main(); those entry
  * points are renamed (os_features_main / os_stress_main) and invoked here.
  */
 
 #include <cstdio>
+#include <osv/drivers_config.h>
 #include <osv/power.hh>
 
 int os_features_main();
@@ -25,6 +28,9 @@ int os_stress_main();
 int os_iostream_main();
 int os_memmove_main();
 int os_string_main();
+#if CONF_drivers_nvme
+int os_nvme_main();
+#endif
 
 extern "C" void osv_app_main()
 {
@@ -42,6 +48,10 @@ extern "C" void osv_app_main()
     rc |= os_string_main();
     printf("\n");
     rc |= os_stress_main();
+#if CONF_drivers_nvme
+    printf("\n");
+    rc |= os_nvme_main();
+#endif
 
     printf("\n######## OSv test application: %s ########\n\n",
            rc ? "FAILURE" : "SUCCESS");

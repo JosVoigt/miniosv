@@ -57,6 +57,33 @@ static void setup_identify_cmd(nvme_sq_entry_t *cmd, u32 namespace_id, u32 cns) 
   cmd->identify.cns = cns;
 }
 
+static bool failed(const nvme_cq_entry_t &res) {
+  return res.sc != 0 || res.sct != 0;
+}
+
+namespace {
+// One zeroed page for the data of an admin command. The admin queue passes it
+// as prp1 alone, so the data must not cross a page boundary, which a heap
+// allocation of the same size doesn't promise.
+struct dma_page {
+  dma_page() : virt(alloc_phys_contiguous_aligned(mmu::page_size, mmu::page_size)) {
+    if (virt) {
+      memset(virt, 0, mmu::page_size);
+      pa = mmu::virt_to_phys(virt);
+    }
+  }
+  ~dma_page() {
+    if (virt)
+      free_phys_contiguous_aligned(virt);
+  }
+  dma_page(const dma_page &) = delete;
+  dma_page &operator=(const dma_page &) = delete;
+
+  void *virt;
+  mmu::phys pa = 0;
+};
+} // namespace
+
 template <typename Q>
 static void setup_create_io_queue_cmd(Q *create_queue_cmd, int qid, int qsize,
                                       u8 command_opcode, u64 queue_addr) {
@@ -399,6 +426,32 @@ void nvme_driver::enable_write_cache() {
   } else {
     nvme_i("Enabled write cache");
   }
+}
+
+// ===========================================================================
+// Health
+// ===========================================================================
+
+int nvme_driver::get_smart_log(nvme_log_page_health_t &log) {
+  dma_page buf;
+  if (!buf.virt)
+    return ENOMEM;
+
+  nvme_sq_entry_t cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.get_log_page.common.opc = NVME_ACMD_GET_LOG_PAGE;
+  cmd.get_log_page.common.nsid = NVME_NSID_ALL;
+  cmd.get_log_page.lid = NVME_LOG_HEALTH;
+  cmd.get_log_page.numd = sizeof(log) / 4 - 1; // dwords, 0-based
+  auto res = _admin_queue->submit_and_return_on_completion(
+      &cmd, (void *)buf.pa, sizeof(log));
+  if (failed(res)) {
+    nvme_e("Get Log Page (SMART) failed nvme%d: sc=%#x sct=%#x", _id, res.sc,
+           res.sct);
+    return EIO;
+  }
+  memcpy(&log, buf.virt, sizeof(log));
+  return 0;
 }
 
 // ===========================================================================

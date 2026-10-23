@@ -77,6 +77,16 @@ public:
   bool reset_and_destroy_controller();
   bool shutdown_controller();
 
+  // --- health ---
+  // These issue admin commands and block until they complete. They return 0 or
+  // a positive errno: EIO when the command fails, ENOMEM when there is no
+  // memory for the command's data.
+
+  const nvme_identify_ctlr_t &identify() const { return *_identify_controller; }
+
+  // SMART / Health Information log page for the whole controller.
+  int get_smart_log(nvme_log_page_health_t &log);
+
   // --- multi-controller registry ---
   static nvme_driver *get_nvme_device(int id);
   const int get_id() { return _id; }
@@ -134,6 +144,9 @@ private:
   interrupt_manager _msi;
   std::vector<std::unique_ptr<msix_vector>> _msix_vectors;
 };
+
+// Units of the health data.
+inline int kelvin_to_celsius(u16 kelvin) { return int(kelvin) - 273; }
 
 } // namespace nvme
 #endif
