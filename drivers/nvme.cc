@@ -646,9 +646,10 @@ void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) 
   qp->set_max_transfer(_max_transfer_bytes);
   _io_queues.push_back(std::move(queue));
 
-  assert(target_interrupt_cpu != nullptr); 
-  msix_register_completion_interrupt(
-      iv, qp, target_interrupt_cpu);
+  if (!target_interrupt_cpu) {
+    target_interrupt_cpu = sched::cpu::current();
+  }
+  msix_register_completion_interrupt(iv, qp, target_interrupt_cpu);
 
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_cq);
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_sq);

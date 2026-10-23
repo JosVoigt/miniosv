@@ -26,3 +26,17 @@ app-objects += tests/os-stress.o
 ifeq ($(conf_drivers_nvme),1)
 app-objects += tests/os-nvme.o
 endif
+
+# Serial of a controller os-nvme may write to besides QEMU's --emulated-nvme
+# drive (e.g. a passed-through disk whose data may go). A stamp rebuilds
+# os-nvme.o when it changes.
+nvme_test_write_serial ?=
+nvme_test_write_serial_dep = $(out)/nvme_test_write_serial.last
+.PHONY: nvme_test_write_serial_phony
+$(nvme_test_write_serial_dep): nvme_test_write_serial_phony
+	$(call very-quiet, $(makedir))
+	@if [ "$$(cat $@ 2>/dev/null)" != "$(nvme_test_write_serial)" ]; then \
+		echo -n "$(nvme_test_write_serial)" > $@; \
+	fi
+$(out)/tests/os-nvme.o: $(nvme_test_write_serial_dep)
+$(out)/tests/os-nvme.o: CXXFLAGS += -DNVME_TEST_WRITE_SERIAL='"$(nvme_test_write_serial)"'

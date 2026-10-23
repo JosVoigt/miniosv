@@ -4,6 +4,10 @@
  * On every NVMe controller the driver found (under QEMU the boot disk is one):
  *
  *   - the SMART / health log reads and holds a plausible temperature
+ *   - reads work, a transfer above the controller's limit is refused, and on
+ *     a scratch controller writes of different sizes and buffer alignments
+ *     (one block, across a page boundary, needing a PRP list, the largest
+ *     transfer) read back unchanged
  *   - the power state table makes sense, every power state can be set and
  *     reads back, an out-of-range one is refused, and the original state is
  *     restored afterwards (where the controller lets the host change it at
@@ -16,13 +20,26 @@
  * power checks only do something on real hardware:
  *
  *     make app=tests && scripts/run.py --pass-pci <addr>
+ *
+ * Writes only go to a controller that is scratch space: the --emulated-nvme
+ * drive (serial "deadbeef", see scripts/run.py), or the one whose serial is
+ * given with `make app=tests nvme_test_write_serial=<serial>`. They overwrite
+ * a few MiB from 64 MiB on.
  */
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
+#include <osv/sched.hh>
+
 #include "drivers/nvme.hh"
+
+#ifndef NVME_TEST_WRITE_SERIAL
+#define NVME_TEST_WRITE_SERIAL ""
+#endif
 
 namespace {
 
@@ -75,6 +92,137 @@ void test_smart(nvme::nvme_driver &d)
           "composite temperature is plausible");
     check(log.avspare <= 100 && log.avsparethresh <= 100,
           "spare percentages are percentages");
+}
+
+// Identify strings are space padded, not NUL terminated.
+bool id_string_is(const char *field, size_t size, const char *want)
+{
+    size_t len = size;
+    while (len > 0 && (field[len - 1] == ' ' || field[len - 1] == 0)) {
+        len--;
+    }
+    return len > 0 && strlen(want) == len && memcmp(field, want, len) == 0;
+}
+
+bool may_write(nvme::nvme_driver &d)
+{
+    const auto &id = d.identify();
+    return id_string_is(id.sn, sizeof(id.sn), "deadbeef") ||
+           id_string_is(id.sn, sizeof(id.sn), NVME_TEST_WRITE_SERIAL);
+}
+
+struct io_wait {
+    sched::thread *thread;
+    std::atomic<bool> done{false};
+    nvme_cq_entry_t cqe;
+};
+
+// Runs in the queue's interrupt.
+void io_done(void *ctx, const nvme_cq_entry_t *cqe)
+{
+    auto *w = static_cast<io_wait *>(ctx);
+    // Once done is set the waiter may return and take w with it.
+    auto *thread = w->thread;
+    w->cqe = *cqe;
+    w->done.store(true, std::memory_order_release);
+    thread->wake_with_irq_disabled();
+}
+
+// One command, waited for. Returns 0, submit_request()'s error, or -1 when the
+// command completed with an error status.
+int io_sync(nvme::io_queue_pair *q, nvme::NVME_COMMAND op, u64 addr,
+            void *buf, u32 len)
+{
+    io_wait w;
+    w.thread = sched::thread::current();
+    int rc;
+    while ((rc = q->submit_request(NVME_NAMESPACE_DEFAULT_NS, buf, addr, len,
+                                   io_done, &w, 0, op)) == 0) {
+        sched::thread::yield(); // queue full
+    }
+    if (rc != 1) {
+        return rc;
+    }
+    sched::thread::wait_until(
+        [&] { return w.done.load(std::memory_order_acquire); });
+    return (w.cqe.sct || w.cqe.sc) ? -1 : 0;
+}
+
+void fill(char *buf, u32 len, u64 seed)
+{
+    for (u32 i = 0; i < len; i += sizeof(u64)) {
+        u64 v = seed ^ (u64(i) * 0x9E3779B97F4A7C15ull);
+        memcpy(buf + i, &v, sizeof(v));
+    }
+}
+
+void test_read_write(nvme::nvme_driver &d)
+{
+    const auto *ns = d._ns_data[NVME_NAMESPACE_DEFAULT_NS];
+    u32 bs = ns->blocksize;
+    u32 max = d.max_transfer_bytes();
+    printf("        %u-byte blocks, largest transfer %u bytes\n", bs, max);
+    check(max >= 4096 && max <= (1u << 20) && max % bs == 0,
+          "largest transfer is between 4 KiB and 1 MiB");
+
+    // Stays for the rest of the run: remove_io_user_queue() deletes the CQ
+    // before its SQ, which the spec doesn't allow.
+    auto *q = static_cast<nvme::io_queue_pair *>(d.create_io_queue(8));
+    // Room for the largest transfer at an offset into its first page.
+    size_t buf_size = max + 4096;
+    auto *wbuf = static_cast<char *>(aligned_alloc(4096, buf_size));
+    auto *rbuf = static_cast<char *>(aligned_alloc(4096, buf_size));
+    if (!q || !wbuf || !rbuf) {
+        check(false, "I/O queue and buffers");
+        free(wbuf);
+        free(rbuf);
+        return;
+    }
+
+    check(io_sync(q, nvme::READ, 0, rbuf, bs) == 0, "block 0 reads");
+    check(q->submit_request(NVME_NAMESPACE_DEFAULT_NS, rbuf, 0, max + bs,
+                            io_done, nullptr, 0, nvme::READ) == EINVAL,
+          "transfer above the largest is refused");
+
+    u64 base = (64u << 20) / bs;
+    if (!may_write(d)) {
+        printf("        writes skipped: not a scratch controller\n");
+    } else if (ns->blockcount < base + (8u << 20) / bs) {
+        printf("        writes skipped: namespace too small\n");
+    } else {
+        struct {
+            u32 len, buf_off, block;
+            const char *what;
+        } cases[] = {
+            {bs, 0, 1, "one block"},
+            {4096, 0, 8, "4 KiB"},
+            {4096, 512, 17, "4 KiB across a page boundary"},
+            {8192, 0, 40, "8 KiB"},
+            {128 << 10, 0, 101, "128 KiB (PRP list)"},
+            {128 << 10, 512, 400, "128 KiB across pages (PRP list)"},
+            {max, 0, 1001, "largest transfer"},
+        };
+        char what[96];
+        for (auto &c : cases) {
+            if (c.len % bs || c.buf_off % 4) {
+                continue;
+            }
+            u64 addr = (base + c.block) * bs;
+            char *w = wbuf + c.buf_off, *r = rbuf + c.buf_off;
+            fill(w, c.len, addr);
+            memset(r, 0, c.len);
+            int werr = io_sync(q, nvme::WRITE, addr, w, c.len);
+            int rerr = werr ? 0 : io_sync(q, nvme::READ, addr, r, c.len);
+            bool same = !werr && !rerr && memcmp(w, r, c.len) == 0;
+            snprintf(what, sizeof(what), "%s writes and reads back%s", c.what,
+                     werr ? " (write failed)"
+                          : rerr ? " (read failed)" : same ? "" : " (differs)");
+            check(same, what);
+        }
+    }
+
+    free(wbuf);
+    free(rbuf);
 }
 
 void print_power_states(nvme::nvme_driver &d)
@@ -227,6 +375,7 @@ int os_nvme_main()
                d->get_id(), id.mn, id.fr, d->power_state_count(),
                d->apst_supported() ? "supported" : "not supported");
         test_smart(*d);
+        test_read_write(*d);
         test_power_states(*d);
         test_apst(*d);
     }
