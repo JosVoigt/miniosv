@@ -61,6 +61,11 @@ static bool failed(const nvme_cq_entry_t &res) {
   return res.sc != 0 || res.sct != 0;
 }
 
+// Command specific status 0Eh of Set Features.
+static bool feature_not_changeable(const nvme_cq_entry_t &res) {
+  return res.sct == 1 && res.sc == 0x0E;
+}
+
 namespace {
 // One zeroed page for the data of an admin command. The admin queue passes it
 // as prp1 alone, so the data must not cross a page boundary, which a heap
@@ -428,8 +433,24 @@ void nvme_driver::enable_write_cache() {
   }
 }
 
+int nvme_driver::get_feature(u8 fid, u32 *value, void *data) {
+  nvme_sq_entry_t cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.get_features.common.opc = NVME_ACMD_GET_FEATURES;
+  cmd.get_features.fid = fid;
+  auto res = _admin_queue->submit_and_return_on_completion(
+      &cmd, data, data ? mmu::page_size : 0);
+  if (failed(res)) {
+    nvme_e("Get Features fid=%#x failed: sc=%#x sct=%#x", fid, res.sc, res.sct);
+    return EIO;
+  }
+  if (value)
+    *value = res.cs;
+  return 0;
+}
+
 // ===========================================================================
-// Health
+// Health and power management
 // ===========================================================================
 
 int nvme_driver::get_smart_log(nvme_log_page_health_t &log) {
@@ -451,6 +472,37 @@ int nvme_driver::get_smart_log(nvme_log_page_health_t &log) {
     return EIO;
   }
   memcpy(&log, buf.virt, sizeof(log));
+  return 0;
+}
+
+const nvme_power_state_t &nvme_driver::power_state(unsigned ps) const {
+  assert(ps < power_state_count());
+  return _identify_controller->psd[ps];
+}
+
+int nvme_driver::get_power_state(u8 &ps) {
+  u32 value;
+  int err = get_feature(NVME_FEATURE_POWER_MGMT, &value);
+  if (err)
+    return err;
+  ps = value & 0x1F;
+  return 0;
+}
+
+int nvme_driver::set_power_state(u8 ps) {
+  if (ps >= power_state_count())
+    return EINVAL;
+
+  // Workload hint (cdw11[7:5]) left at 0: no hint.
+  nvme_sq_entry_t cmd;
+  setup_features_cmd(&cmd, NVME_FEATURE_POWER_MGMT, ps);
+  auto res = _admin_queue->submit_and_return_on_completion(&cmd);
+  if (failed(res)) {
+    nvme_e("Set power state %u failed nvme%d: sc=%#x sct=%#x", ps, _id, res.sc,
+           res.sct);
+    // QEMU's emulated controller, for one, doesn't let the host change it.
+    return feature_not_changeable(res) ? ENOTSUP : EIO;
+  }
   return 0;
 }
 

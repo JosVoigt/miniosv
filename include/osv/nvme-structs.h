@@ -407,6 +407,36 @@ struct nvme_sgls {
 
 static_assert(sizeof(nvme_sgls) == 4);
 
+/// Admin data:  Power State Descriptor (Identify Controller, bytes 2048+)
+typedef struct __attribute__((packed)) _nvme_power_state {
+  u16 mp;         ///< maximum power, in units given by mxps
+  u8 rsvd2;       ///< reserved
+  u8 mxps : 1;    ///< max power scale: 0 = 0.01 W, 1 = 0.0001 W
+  u8 nops : 1;    ///< non-operational state: no I/O is processed in it
+  u8 rsvd3 : 6;   ///< reserved
+  u32 enlat;      ///< entry latency (us)
+  u32 exlat;      ///< exit latency (us)
+  u8 rrt : 5;     ///< relative read throughput
+  u8 rsvd12 : 3;  ///< reserved
+  u8 rrl : 5;     ///< relative read latency
+  u8 rsvd13 : 3;  ///< reserved
+  u8 rwt : 5;     ///< relative write throughput
+  u8 rsvd14 : 3;  ///< reserved
+  u8 rwl : 5;     ///< relative write latency
+  u8 rsvd15 : 3;  ///< reserved
+  u16 idlp;       ///< idle power, in units given by ips
+  u8 rsvd18 : 6;  ///< reserved
+  u8 ips : 2;     ///< idle power scale: 0 = n/a, 1 = 0.0001 W, 2 = 0.01 W
+  u8 rsvd19;      ///< reserved
+  u16 actp;       ///< active power, in units given by aps
+  u8 apw : 3;     ///< active power workload
+  u8 rsvd22 : 3;  ///< reserved
+  u8 aps : 2;     ///< active power scale: 0 = n/a, 1 = 0.0001 W, 2 = 0.01 W
+  u8 rsvd23[9];   ///< reserved
+} nvme_power_state_t;
+
+static_assert(sizeof(nvme_power_state_t) == 32, "power state descriptor is 32 bytes");
+
 /// Admin data:  Identify Controller Data
 typedef struct _nvme_identify_ctlr {
   u16 vid;          ///< PCI vendor id
@@ -427,7 +457,10 @@ typedef struct _nvme_identify_ctlr {
   u8 elpe;          ///< error log page entries
   u8 npss;          ///< number of power states support
   u8 avscc;         ///< admin vendor specific config
-  u8 rsvd265[247];  ///< reserved (265-511)
+  u8 apsta;         ///< autonomous power state transition attributes
+  u16 wctemp;       ///< warning composite temperature threshold (K)
+  u16 cctemp;       ///< critical composite temperature threshold (K)
+  u8 rsvd270[242];  ///< reserved (270-511)
   u8 sqes;          ///< submission queue entry size
   u8 cqes;          ///< completion queue entry size
   u8 rsvd514[2];    ///< reserved (514-515)
@@ -443,9 +476,14 @@ typedef struct _nvme_identify_ctlr {
   nvme_sgls sgls;   ///< SGL support
   u8 rsvd540[164];  ///< reserved (540-703)
   u8 rsvd704[1344]; ///< reserved (704-2047)
-  u8 psd[1024];     ///< power state 0-31 descriptors
+  nvme_power_state_t psd[32]; ///< power state 0-31 descriptors
   u8 vs[1024];      ///< vendor specific
 } nvme_identify_ctlr_t;
+
+static_assert(sizeof(nvme_identify_ctlr_t) == 4096, "identify controller is 4K");
+static_assert(__builtin_offsetof(nvme_identify_ctlr_t, npss) == 263, "npss");
+static_assert(__builtin_offsetof(nvme_identify_ctlr_t, apsta) == 265, "apsta");
+static_assert(__builtin_offsetof(nvme_identify_ctlr_t, psd) == 2048, "psd");
 
 /// Admin data:  Identify Namespace - LBA Format Data
 typedef struct _nvme_lba_format {

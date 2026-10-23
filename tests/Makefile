@@ -14,7 +14,7 @@
 #   - os-memmove   : memmove() overlap-correctness regression test
 #   - os-string    : memcmp() correctness + throughput
 #   - os-stress    : concurrency / allocator / TLS stress tests
-#   - os-nvme      : NVMe health (SMART log) (conf_drivers_nvme)
+#   - os-nvme      : NVMe health and power states (conf_drivers_nvme)
 
 app-objects = tests/osv_tests.o
 app-objects += tests/os-features.o

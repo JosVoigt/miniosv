@@ -77,15 +77,28 @@ public:
   bool reset_and_destroy_controller();
   bool shutdown_controller();
 
-  // --- health ---
+  // --- health and power management ---
   // These issue admin commands and block until they complete. They return 0 or
-  // a positive errno: EIO when the command fails, ENOMEM when there is no
-  // memory for the command's data.
+  // a positive errno: EINVAL for an argument the controller can't take,
+  // ENOTSUP for a feature it doesn't have, EIO when the command fails, ENOMEM
+  // when there is no memory for the command's data.
 
   const nvme_identify_ctlr_t &identify() const { return *_identify_controller; }
 
   // SMART / Health Information log page for the whole controller.
   int get_smart_log(nvme_log_page_health_t &log);
+
+  // Power states are numbered 0 .. power_state_count() - 1, 0 being the one
+  // with the highest power and performance.
+  unsigned power_state_count() const { return _identify_controller->npss + 1u; }
+  const nvme_power_state_t &power_state(unsigned ps) const;
+
+  // The power state set with set_power_state() or by APST. A non-operational
+  // state is left for the last operational one as soon as I/O arrives.
+  // set_power_state() fails with ENOTSUP where the controller doesn't let
+  // the host change the power state.
+  int get_power_state(u8 &ps);
+  int set_power_state(u8 ps);
 
   // --- multi-controller registry ---
   static nvme_driver *get_nvme_device(int id);
@@ -111,6 +124,9 @@ private:
   int set_number_of_queues(u16 num, u16 *ret);
   int set_interrupt_coalescing(u8 threshold, u8 time);
   void enable_write_cache();
+  // Get Features with cdw11 = 0; the feature's value comes back in *value
+  // and, for features with a data structure, in data (one page, physical).
+  int get_feature(u8 fid, u32 *value, void *data = nullptr);
 
   // --- interrupts (MSI-X) ---
   void enable_msix();
@@ -145,8 +161,21 @@ private:
   std::vector<std::unique_ptr<msix_vector>> _msix_vectors;
 };
 
-// Units of the health data.
+// Units of the health and power data.
 inline int kelvin_to_celsius(u16 kelvin) { return int(kelvin) - 273; }
+
+inline double max_power_watts(const nvme_power_state_t &ps) {
+  return ps.mp * (ps.mxps ? 0.0001 : 0.01);
+}
+
+// NaN where the controller doesn't report it (scale 0).
+inline double scaled_power_watts(u16 value, u8 scale) {
+  switch (scale) {
+  case 1: return value * 0.0001;
+  case 2: return value * 0.01;
+  default: return __builtin_nan("");
+  }
+}
 
 } // namespace nvme
 #endif
