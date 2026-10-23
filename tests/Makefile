@@ -35,8 +35,8 @@ nvme_test_write_serial_dep = $(out)/nvme_test_write_serial.last
 .PHONY: nvme_test_write_serial_phony
 $(nvme_test_write_serial_dep): nvme_test_write_serial_phony
 	$(call very-quiet, $(makedir))
-	@if [ "$$(cat $@ 2>/dev/null)" != "$(nvme_test_write_serial)" ]; then \
-		echo -n "$(nvme_test_write_serial)" > $@; \
+	@if [ ! -e $@ ] || [ "$$(cat $@)" != "$(nvme_test_write_serial)" ]; then \
+		printf '%s' "$(nvme_test_write_serial)" > $@; \
 	fi
 $(out)/tests/os-nvme.o: $(nvme_test_write_serial_dep)
 $(out)/tests/os-nvme.o: CXXFLAGS += -DNVME_TEST_WRITE_SERIAL='"$(nvme_test_write_serial)"'
