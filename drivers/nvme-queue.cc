@@ -324,6 +324,9 @@ namespace nvme
 
     int io_queue_pair::submit_request(int ns, void *payload, uint64_t addr, uint32_t len, osv_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags, NVME_COMMAND cmd)
     {
+        if (len > _max_transfer) {
+            return EINVAL;
+        }
         u64 slba = addr >> _ns[ns]->blockshift;
         u32 nlb = len >> _ns[ns]->blockshift;
 

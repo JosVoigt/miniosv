@@ -355,6 +355,18 @@ int nvme_driver::identify_controller() {
   nvme_d("nvme%d: CQ entry size 2^%u max, 2^%u required", _id, data->cqes >> 4,
          data->cqes & 0xf);
 
+  // MDTS is a power of two in units of the minimum memory page size, 0 for no
+  // limit. map_prps() fills one PRP list page, fewer than 512 data pages, so
+  // 1 MiB is the most it takes whatever the buffer's alignment.
+  u64 max_transfer = 1u << 20;
+  if (data->mdts) {
+    u64 mdts = (u64(1) << data->mdts) << (12 + _control_reg->cap.mpsmin);
+    max_transfer = std::min(max_transfer, mdts);
+  }
+  _max_transfer_bytes = max_transfer;
+  nvme_d("nvme%d: MDTS %u, max transfer %u bytes", _id, data->mdts,
+         _max_transfer_bytes);
+
   _identify_controller.reset(data);
   return 0;
 }
@@ -631,6 +643,7 @@ void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) 
   // below and must not be dereferenced afterwards (this used to register the
   // interrupt with a moved-from, i.e. null, pointer).
   io_queue_pair *qp = queue.get();
+  qp->set_max_transfer(_max_transfer_bytes);
   _io_queues.push_back(std::move(queue));
 
   assert(target_interrupt_cpu != nullptr); 

@@ -76,6 +76,9 @@ public:
   // (really an io_queue_pair*). target_interrupt_cpu pins the queue's MSI-X
   // completion interrupt; nullptr uses the current CPU.
   void *create_io_queue(int qsize, sched::cpu *target_interrupt_cpu = nullptr);
+
+  // Largest single read or write, in bytes; submit_request() refuses larger.
+  u32 max_transfer_bytes() const { return _max_transfer_bytes; }
   void remove_io_user_queue(io_queue_pair *queue);
 
   bool reset_and_destroy_controller();
@@ -169,6 +172,7 @@ private:
   pci::bar *_bar0 = nullptr;
   nvme_controller_reg_t *_control_reg = nullptr;
   u32 _doorbell_stride;
+  u32 _max_transfer_bytes = 0;
   u32 _qsize;
 
   std::unique_ptr<nvme_identify_ctlr_t> _identify_controller;

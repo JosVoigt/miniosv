@@ -188,12 +188,14 @@ public:
 
     // addr and len are in bytes and must be multiples of the block size.
     // Returns 1 when the command was submitted, 0 when the queue is full (try
-    // again after completions), ENOTBLK for an unknown command.
+    // again after completions), EINVAL when len is above the controller's
+    // max_transfer_bytes(), ENOTBLK for an unknown command.
     int submit_request(int ns, void *payload, uint64_t addr, uint32_t len, osv_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags, NVME_COMMAND cmd);
 
     // submit_request only places the command; the caller batches submissions and
     // calls this once per batch.
     using queue_pair::ring_sq_doorbell;
+    void set_max_transfer(u32 bytes) { _max_transfer = bytes; }
 
     int process_completions(int max) override;
 
@@ -209,6 +211,7 @@ private:
     u16 submit_read_write_page_cmd(u16 cid, u32 nsid, int opc, u64 slba, u32 nlb, void* payload, nvme_pending_req* req);
 
     static constexpr size_t max_pending_levels = 4;
+    u32 _max_transfer = 0;
 
     // Let us hold to allocated PRP pages but also limit to up 16 ones
     ring_spsc<u64*, unsigned, 16> _free_prp_lists;
