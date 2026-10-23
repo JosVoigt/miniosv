@@ -16,7 +16,9 @@
 namespace pci { class device; }
 
 #define nvme_tag "nvme"
-#define nvme_d(...)    tprintf_d(nvme_tag, __VA_ARGS__)
+// nvme_d goes straight to tprintf rather than tprintf_d, which is compiled out
+// unless CONF_logger_debug: the "nvme" tag's level (conf_nvme_log) decides.
+#define nvme_d(...)    tprintf(nvme_tag, logger_debug, __VA_ARGS__)
 #define nvme_i(...)    tprintf_i(nvme_tag, __VA_ARGS__)
 #define nvme_w(...)    tprintf_w(nvme_tag, __VA_ARGS__)
 #define nvme_e(...)    tprintf_e(nvme_tag, __VA_ARGS__)

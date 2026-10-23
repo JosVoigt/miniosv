@@ -5,6 +5,8 @@
  * BSD license as described in the LICENSE file in the top-level directory.
  */
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <cstdarg>
 #include "drivers/console.hh"
@@ -12,6 +14,7 @@
 #include <osv/debug.hh>
 #include <osv/debug.h>
 #include <osv/export.h>
+#include <osv/kernel_config.h>
 
 #include "early-console.hh"
 
@@ -41,7 +44,7 @@ bool logger::parse_configuration(void)
     add_tag("dhcp", logger_info);
     add_tag("acpi", logger_error);
     add_tag("ena", logger_debug);
-    add_tag("nvme", logger_debug);
+    add_tag("nvme", CONF_nvme_log);
 
     return (true);
 }
@@ -118,10 +121,19 @@ void logger::wrt(const char* tag, logger_severity severity, const char* _fmt, va
     }
 
     unsigned long tid = sched::thread::current()->id();
+    char msg[1024];
+    size_t len = snprintf(msg, sizeof(msg), "[%s/%lu %s]: ",
+                          loggable_severity(severity), tid, tag);
+    int n = vsnprintf(msg + len, sizeof(msg) - len - 1, _fmt, ap);
+    if (n > 0) {
+        len += std::min<size_t>(n, sizeof(msg) - len - 2);
+    }
+    msg[len++] = '\n';
+    // Unlike debug()/kprintf(), which reach the console only when verbose,
+    // whatever passes the tag's level is printed: the level is the switch.
     _lock.lock();
-    kprintf("[%s/%lu %s]: ", loggable_severity(severity), tid, tag);
-    vkprintf(_fmt, ap);
-    kprintf("\n");
+    fill_debug_buffer(msg, len);
+    console::write(msg, len);
     _lock.unlock();
 }
 

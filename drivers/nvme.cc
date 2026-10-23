@@ -122,9 +122,9 @@ nvme_driver::nvme_driver(pci::device &pci_dev) : _dev(pci_dev), _msi(&pci_dev) {
   auto parse_ok = parse_pci_config();
   assert(parse_ok);
 
-  enable_msix();
-
   _id = _instance++;
+
+  enable_msix();
 
   _doorbell_stride = 1 << (2 + _control_reg->cap.dstrd);
   _qsize = _control_reg->cap.mqes + 1;
@@ -152,6 +152,22 @@ nvme_driver::nvme_driver(pci::device &pci_dev) : _dev(pci_dev), _msi(&pci_dev) {
   }
 
   nvme_drives.push_back(this);
+
+  // The one line a normal boot prints per controller (conf_nvme_log=info).
+  // Identify strings are space padded, not NUL terminated.
+  auto trimmed = [](const char *s, int len) {
+    while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == 0))
+      len--;
+    return len;
+  };
+  const auto *id = _identify_controller.get();
+  u8 B, D, F;
+  _dev.get_bdf(B, D, F);
+  auto *ns = _ns_data[NVME_NAMESPACE_DEFAULT_NS];
+  nvme_i("nvme%d: %02x:%02x.%x %.*s, fw %.*s, %lu MiB in %u-byte blocks", _id,
+         (u16)B, (u16)D, (u16)F, trimmed(id->mn, sizeof(id->mn)), id->mn,
+         trimmed(id->fr, sizeof(id->fr)), id->fr,
+         (u64)(ns->blockcount * ns->blocksize >> 20), ns->blocksize);
 }
 
 hw_driver *nvme_driver::probe(hw_device *dev) {
@@ -245,7 +261,7 @@ int nvme_driver::wait_for_controller_shutdown_done() {
   for (int i = 0; i < timeout; i++) {
     csts.val = mmio_getl(&_control_reg->csts);
     if (csts.shst == 2 && csts.st == 0) {
-      printf("controller shutdown properly\n");
+      nvme_d("nvme%d: controller shut down", _id);
       return 0;
     }
     usleep(500 * 1000); // steps are in 500ms units
@@ -331,13 +347,13 @@ int nvme_driver::identify_controller() {
       return EIO;
     }
     if (attempt == 0) {
-      nvme_i("nvme%d: identify data empty, waiting for backing storage\n", _id);
+      nvme_i("nvme%d: identify data empty, waiting for backing storage", _id);
     }
     usleep(500 * 1000);
   }
 
-  printf("cqes min: %lu cqes max: %lu\n", (u64)(data->cqes >> 4),
-         (u64)(data->cqes & 0xf));
+  nvme_d("nvme%d: CQ entry size 2^%u max, 2^%u required", _id, data->cqes >> 4,
+         data->cqes & 0xf);
 
   _identify_controller.reset(data);
   return 0;
@@ -368,7 +384,7 @@ int nvme_driver::identify_namespace(u32 nsid) {
       return EIO;
     }
     if (attempt == 0) {
-      nvme_e("nvme%d: namespace %d empty, waiting for backing storage\n", _id,
+      nvme_e("nvme%d: namespace %d empty, waiting for backing storage", _id,
              nsid);
     }
     usleep(500 * 1000);
@@ -381,8 +397,8 @@ int nvme_driver::identify_namespace(u32 nsid) {
   _ns_data[nsid]->bpshift = NVME_PAGESHIFT - _ns_data[nsid]->blockshift;
   _ns_data[nsid]->id = nsid;
 
-  printf("Identified namespace with nsid=%d, blockcount=%d, blocksize=%d\n",
-         nsid, _ns_data[nsid]->blockcount, _ns_data[nsid]->blocksize);
+  nvme_d("nvme%d: namespace %u: %lu blocks of %u bytes", _id, nsid,
+         (u64)_ns_data[nsid]->blockcount, _ns_data[nsid]->blocksize);
   return 0;
 }
 
@@ -419,7 +435,7 @@ int nvme_driver::set_interrupt_coalescing(u8 threshold, u8 time) {
            res.sct);
     return EIO;
   }
-  nvme_i("Enabled interrupt coalescing");
+  nvme_d("nvme%d: enabled interrupt coalescing", _id);
   return 0;
 }
 
@@ -430,7 +446,7 @@ void nvme_driver::enable_write_cache() {
   if (res.sct != 0 || res.sc != 0) {
     nvme_e("Failed to enable write cache: sc=%#x sct=%#x", res.sc, res.sct);
   } else {
-    nvme_i("Enabled write cache");
+    nvme_d("nvme%d: enabled write cache", _id);
   }
 }
 
@@ -498,11 +514,15 @@ int nvme_driver::set_power_state(u8 ps) {
   nvme_sq_entry_t cmd;
   setup_features_cmd(&cmd, NVME_FEATURE_POWER_MGMT, ps);
   auto res = _admin_queue->submit_and_return_on_completion(&cmd);
+  if (feature_not_changeable(res)) {
+    // QEMU's emulated controller, for one, doesn't let the host change it.
+    nvme_d("nvme%d: power state not changeable by the host", _id);
+    return ENOTSUP;
+  }
   if (failed(res)) {
     nvme_e("Set power state %u failed nvme%d: sc=%#x sct=%#x", ps, _id, res.sc,
            res.sct);
-    // QEMU's emulated controller, for one, doesn't let the host change it.
-    return feature_not_changeable(res) ? ENOTSUP : EIO;
+    return EIO;
   }
   return 0;
 }
@@ -620,8 +640,7 @@ void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) 
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_cq);
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_sq);
 
-  printf("nvme: Created I/O queue pair for qid:%d with size:%d pointer=%p\n",
-         qid, qsize, qp);
+  nvme_d("nvme%d: created I/O queue pair qid %d, size %d", _id, qid, qsize);
   return qp;
 }
 
@@ -658,7 +677,7 @@ void nvme_driver::enable_msix() {
   unsigned int vectors_num =
       std::min((size_t)_dev.msix_get_num_entries(), sched::cpus.size() + 1);
 
-  printf("we have %i vectors_num\n", vectors_num); 
+  nvme_d("nvme%d: %u MSI-X vectors", _id, vectors_num);
 
   // and not push them; currently i am not sure if this can be done mt so
   // i'll go with that solution to just make it big enough
@@ -674,7 +693,8 @@ bool nvme_driver::msix_register_completion_interrupt(unsigned iv, queue_pair *qp
   auto vec = std::unique_ptr<msix_vector>(new msix_vector(&_dev));
   _msi.assign_isr(vec.get(), [qp]() { qp->process_completions(512); });
 
-  printf("running on isr %i\n", vec.get()->get_vector()); 
+  nvme_d("nvme%d: queue %u completions on vector %u", _id, qp->_id,
+         vec->get_vector());
 
   if (!_msi.setup_entry(iv, vec.get())) {
     return false;
@@ -685,7 +705,7 @@ bool nvme_driver::msix_register_completion_interrupt(unsigned iv, queue_pair *qp
   if (iv < _msix_vectors.size()) {
     _msix_vectors[iv] = std::move(vec);
   } else {
-    nvme_e("binding_entry %d registration failed\n", iv);
+    nvme_e("binding_entry %d registration failed", iv);
     return false;
   }
   _msix_vectors[iv]->msix_unmask_entries();
@@ -704,7 +724,7 @@ void nvme_driver::dump_config(void) {
   _dev.get_bdf(B, D, F);
 
   _dev.dump_config();
-  nvme_i("%s [%x:%x.%x] vid:id= %x:%x\n", get_name().c_str(), (u16)B, (u16)D,
+  nvme_d("%s [%x:%x.%x] vid:id= %x:%x", get_name().c_str(), (u16)B, (u16)D,
          (u16)F, _dev.get_vendor_id(), _dev.get_device_id());
 }
 

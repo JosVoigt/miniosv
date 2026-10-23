@@ -35,6 +35,9 @@
 #ifndef CONF_logger_debug
 #define CONF_logger_debug 0
 #endif
+#ifndef CONF_nvme_log
+#define CONF_nvme_log logger_info
+#endif
 #ifndef CONF_memory_debug
 #define CONF_memory_debug 0
 #endif

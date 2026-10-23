@@ -157,6 +157,13 @@ conf_interrupt_stack_size=0x2000
 conf_drivers_acpi=1
 conf_drivers_pci=1
 conf_drivers_nvme=1
+# Level of the NVMe driver's boot and error messages (the "nvme" logger tag):
+# debug, info, warn, error or none. info prints one line per controller;
+# debug adds queue and interrupt details; none silences the driver.
+conf_nvme_log=info
+ifeq ($(filter $(conf_nvme_log),debug info warn error none),)
+$(error conf_nvme_log must be one of debug info warn error none, not "$(conf_nvme_log)")
+endif
 
 ifneq ($(MAKECMDGOALS),clean)
 $(info Building into $(out))
@@ -568,6 +575,17 @@ $(app_mode_dep): app_mode_phony
 	@if [ "$$(cat $(app_mode_dep) 2>/dev/null)" != "$(app)" ]; then \
 		echo -n "$(app)" > $(app_mode_dep); \
 	fi
+
+# Same trick for conf_nvme_log, which only core/debug.o is compiled with.
+nvme_log_dep = $(out)/nvme_log.last
+.PHONY: nvme_log_phony
+$(nvme_log_dep): nvme_log_phony
+	$(call very-quiet, $(makedir))
+	@if [ "$$(cat $(nvme_log_dep) 2>/dev/null)" != "$(conf_nvme_log)" ]; then \
+		echo -n "$(conf_nvme_log)" > $(nvme_log_dep); \
+	fi
+$(out)/core/debug.o: $(nvme_log_dep)
+$(out)/core/debug.o: CXXFLAGS += -DCONF_nvme_log=logger_$(conf_nvme_log)
 
 # Set the location of the application for the defered constructors.
 # see .init_array_late in arch/$(arch)/loader.ld)

@@ -398,7 +398,7 @@ namespace nvme
         }
         default:
         {
-            nvme_e("Operation not implemented\n");
+            nvme_e("Operation not implemented");
             return ENOTBLK;
         }
 
@@ -543,7 +543,8 @@ namespace nvme
             if (cqe->sct != 0 || cqe->sc != 0)
             {
                 trace_nvme_req_done_error(_driver_id, _id, cid, cqe->sct, cqe->sc, nullptr);
-                nvme_e("Admin queue cid=%d, sct=%#x, sc=%#x\n", cid, cqe->sct, cqe->sc);
+                // The submitter gets the status and reports what it means.
+                nvme_d("Admin queue cid=%d, sct=%#x, sc=%#x", cid, cqe->sct, cqe->sc);
             }
             else
             {
