@@ -156,6 +156,23 @@ void fill(char *buf, u32 len, u64 seed)
     }
 }
 
+void test_settings(nvme::nvme_driver &d)
+{
+    // The driver never turns coalescing on, and turns the write cache on
+    // where there is one.
+    u8 threshold = 0xFF, time = 0xFF;
+    check(d.get_interrupt_coalescing(threshold, time) == 0 && threshold == 0 &&
+              time == 0,
+          "interrupt coalescing reads as off");
+    bool wc = false;
+    int err = d.get_write_cache(wc);
+    if (d.identify().vwc & 0x1) {
+        check(err == 0 && wc, "write cache reads as on");
+    } else {
+        check(err == ENOTSUP, "no write cache: ENOTSUP");
+    }
+}
+
 void test_read_write(nvme::nvme_driver &d)
 {
     const auto *ns = d._ns_data[NVME_NAMESPACE_DEFAULT_NS];
@@ -375,6 +392,7 @@ int os_nvme_main()
                d->get_id(), id.mn, id.fr, d->power_state_count(),
                d->apst_supported() ? "supported" : "not supported");
         test_smart(*d);
+        test_settings(*d);
         test_read_write(*d);
         test_power_states(*d);
         test_apst(*d);

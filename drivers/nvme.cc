@@ -504,6 +504,27 @@ int nvme_driver::get_smart_log(nvme_log_page_health_t &log) {
   return 0;
 }
 
+int nvme_driver::get_interrupt_coalescing(u8 &threshold, u8 &time) {
+  u32 value;
+  int err = get_feature(NVME_FEATURE_INT_COALESCING, &value);
+  if (err)
+    return err;
+  threshold = value & 0xFF;
+  time = (value >> 8) & 0xFF;
+  return 0;
+}
+
+int nvme_driver::get_write_cache(bool &enabled) {
+  if (!(_identify_controller->vwc & 0x1))
+    return ENOTSUP;
+  u32 value;
+  int err = get_feature(NVME_FEATURE_WRITE_CACHE, &value);
+  if (err)
+    return err;
+  enabled = value & 0x1;
+  return 0;
+}
+
 const nvme_power_state_t &nvme_driver::power_state(unsigned ps) const {
   assert(ps < power_state_count());
   return _identify_controller->psd[ps];

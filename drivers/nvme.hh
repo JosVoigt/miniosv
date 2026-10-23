@@ -95,6 +95,12 @@ public:
   // SMART / Health Information log page for the whole controller.
   int get_smart_log(nvme_log_page_health_t &log);
 
+  // Interrupt Coalescing: an interrupt after threshold + 1 completions or
+  // time x 100 us, whichever comes first; 0 and 0 interrupt on every one.
+  int get_interrupt_coalescing(u8 &threshold, u8 &time);
+  // Whether the volatile write cache is on; ENOTSUP without one.
+  int get_write_cache(bool &enabled);
+
   // Power states are numbered 0 .. power_state_count() - 1, 0 being the one
   // with the highest power and performance.
   unsigned power_state_count() const { return _identify_controller->npss + 1u; }
