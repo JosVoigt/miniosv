@@ -94,6 +94,7 @@ enum {
   NVME_FEATURE_INT_VECTOR = 0x9,      ///< interrupt vector config
   NVME_FEATURE_WRITE_ATOMICITY = 0xA, ///< write atomicity
   NVME_FEATURE_ASYNC_EVENT = 0xB,     ///< async event config
+  NVME_FEATURE_APST = 0xC,            ///< autonomous power state transition
 };
 
 /// NVMe log page identifiers
@@ -649,6 +650,22 @@ typedef struct _nvme_feature_int_vector {
   u16 cd : 1;    ///< coalescing disable
   u16 rsvd : 15; ///< reserved
 } nvme_feature_int_vector_t;
+
+/// Admin feature data:  Autonomous Power State Transition table
+/// Entry n says what to do after the controller has been idle in power state n
+/// for itpt ms: go to power state itps. An entry of 0 means stay.
+typedef struct _nvme_apst_table {
+  u64 entry[32];
+} nvme_apst_table_t;
+
+static_assert(sizeof(nvme_apst_table_t) == 256, "APST table is 256 bytes");
+
+/// APST table entry fields
+inline u64 nvme_apst_entry(u32 itps, u32 itpt_ms) {
+  return (u64(itps & 0x1F) << 3) | (u64(itpt_ms & 0xFFFFFF) << 8);
+}
+inline u32 nvme_apst_itps(u64 entry) { return (entry >> 3) & 0x1F; }
+inline u32 nvme_apst_itpt(u64 entry) { return (entry >> 8) & 0xFFFFFF; }
 
 /// Admin feature:  Write Atomicity
 typedef struct _nvme_feature_write_atomicity {

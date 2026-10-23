@@ -12,6 +12,7 @@
 #include "drivers/nvme-queue.hh"
 #include "drivers/pci-device.hh"
 
+#include <algorithm>
 #include <cassert>
 #include <errno.h>
 #include <map>
@@ -504,6 +505,71 @@ int nvme_driver::set_power_state(u8 ps) {
     return feature_not_changeable(res) ? ENOTSUP : EIO;
   }
   return 0;
+}
+
+int nvme_driver::get_apst(bool &enabled, nvme_apst_table_t *table) {
+  if (!apst_supported())
+    return ENOTSUP;
+  dma_page buf;
+  if (!buf.virt)
+    return ENOMEM;
+
+  u32 value;
+  int err = get_feature(NVME_FEATURE_APST, &value, (void *)buf.pa);
+  if (err)
+    return err;
+  enabled = value & 0x1;
+  if (table)
+    memcpy(table, buf.virt, sizeof(*table));
+  return 0;
+}
+
+int nvme_driver::set_apst_table(bool enable, const nvme_apst_table_t &table) {
+  if (!apst_supported())
+    return ENOTSUP;
+  dma_page buf;
+  if (!buf.virt)
+    return ENOMEM;
+  memcpy(buf.virt, &table, sizeof(table));
+
+  nvme_sq_entry_t cmd;
+  setup_features_cmd(&cmd, NVME_FEATURE_APST, enable ? 1 : 0);
+  auto res = _admin_queue->submit_and_return_on_completion(
+      &cmd, (void *)buf.pa, sizeof(table));
+  if (failed(res)) {
+    nvme_e("Set APST failed nvme%d: sc=%#x sct=%#x", _id, res.sc, res.sct);
+    return EIO;
+  }
+  return 0;
+}
+
+int nvme_driver::set_apst(bool enable, u32 max_exit_latency_us) {
+  if (!apst_supported())
+    return ENOTSUP;
+
+  nvme_apst_table_t table;
+  memset(&table, 0, sizeof(table));
+  if (enable) {
+    // Walk up from the deepest state. Every state gets the transition found
+    // so far below it: to the deepest acceptable non-operational state, after
+    // 50 times that state's entry + exit latency of idleness.
+    u64 target = 0;
+    for (int ps = power_state_count() - 1; ps >= 0; ps--) {
+      table.entry[ps] = target;
+      const auto &desc = _identify_controller->psd[ps];
+      if (!desc.nops || desc.exlat > max_exit_latency_us)
+        continue;
+      u64 total_us = u64(desc.enlat) + desc.exlat;
+      u64 idle_ms = std::min<u64>((total_us + 19) / 20, 0xFFFFFF);
+      target = nvme_apst_entry(ps, idle_ms);
+    }
+    if (!target) {
+      nvme_i("nvme%d: no non-operational state within %u us, APST not enabled",
+             _id, max_exit_latency_us);
+      return EINVAL;
+    }
+  }
+  return set_apst_table(enable, table);
 }
 
 // ===========================================================================

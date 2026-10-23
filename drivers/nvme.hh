@@ -32,6 +32,10 @@
 #define NVME_CTRL_CONFIG_IO_SQ_ENTRY_SIZE_64_BYTES 6
 #define NVME_CTRL_CONFIG_PAGE_SIZE_4K 0
 
+// APST leaves out power states whose exit latency is above this, as Linux'
+// default_ps_max_latency_us does.
+#define NVME_APST_DEFAULT_MAX_LATENCY_US 100000
+
 namespace nvme {
 
 enum NVME_IO_QUEUE_PRIORITY {
@@ -99,6 +103,19 @@ public:
   // the host change the power state.
   int get_power_state(u8 &ps);
   int set_power_state(u8 ps);
+
+  // Autonomous Power State Transitions: the controller drops into deeper
+  // states by itself after being idle for a while.
+  bool apst_supported() const { return _identify_controller->apsta & 0x1; }
+  int get_apst(bool &enabled, nvme_apst_table_t *table = nullptr);
+  // Enabling builds the table the way Linux does: from every state, go to the
+  // deepest non-operational state whose exit latency is at most
+  // max_exit_latency_us, after 50 times its entry + exit latency of idleness.
+  // Fails with EINVAL if no state qualifies. Disabling clears the table.
+  int set_apst(bool enable,
+               u32 max_exit_latency_us = NVME_APST_DEFAULT_MAX_LATENCY_US);
+  // Enable or disable APST with a table of the caller's own.
+  int set_apst_table(bool enable, const nvme_apst_table_t &table);
 
   // --- multi-controller registry ---
   static nvme_driver *get_nvme_device(int id);

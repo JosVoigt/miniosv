@@ -11,7 +11,7 @@
  *                  qsort, setjmp, errno, calendar time) (conformance).
  *   - os-stress:   hammers threads, the allocator, TLS, synchronization, files
  *                  and IPC concurrently to shake out races (stress).
- *   - os-nvme:     NVMe health (SMART log) and power states on every
+ *   - os-nvme:     NVMe health (SMART log), power states and APST on every
  *                  controller the driver found (with conf_drivers_nvme).
  *
  * Both used to be standalone PIE programs with their own main(); those entry
