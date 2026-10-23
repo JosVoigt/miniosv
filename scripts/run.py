@@ -99,7 +99,10 @@ def setup_pflash(arch, code, vars_, pflash_dir, workdir):
     # first-boot device enumeration delays.
     os.makedirs(pflash_dir, exist_ok=True)
     vars_copy = os.path.join(pflash_dir, 'vars.fd')
-    if not os.path.exists(vars_copy):
+    # A copy that doesn't match the template's size (e.g. empty, or made from
+    # another firmware build) would make QEMU refuse the pflash: start over.
+    if (not os.path.exists(vars_copy) or
+            os.path.getsize(vars_copy) != os.path.getsize(vars_)):
         shutil.copy(vars_, vars_copy)
         os.chmod(vars_copy, 0o644)
 
