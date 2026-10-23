@@ -53,7 +53,9 @@ enum NVME_COMMAND {
   FLUSH = 2
 };
 
-typedef void (*osv_nvme_cmd_cb)(void *ctx, const nvme_sq_entry_t* cpl);
+// Called from the queue's MSI-X interrupt with the command's completion entry;
+// sct == 0 && sc == 0 means success.
+typedef void (*osv_nvme_cmd_cb)(void *ctx, const nvme_cq_entry_t* cpl);
 
 typedef struct osv_nvme_callback {
     osv_nvme_cmd_cb cb;
@@ -184,7 +186,10 @@ public:
         return _sq_full.load();
     };
 
-    int submit_request(int ns, void *payload, uint64_t lba, uint32_t lba_count, osv_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags, NVME_COMMAND cmd);
+    // addr and len are in bytes and must be multiples of the block size.
+    // Returns 1 when the command was submitted, 0 when the queue is full (try
+    // again after completions), ENOTBLK for an unknown command.
+    int submit_request(int ns, void *payload, uint64_t addr, uint32_t len, osv_nvme_cmd_cb cb_fn, void *cb_arg, uint32_t io_flags, NVME_COMMAND cmd);
 
     // submit_request only places the command; the caller batches submissions and
     // calls this once per batch.

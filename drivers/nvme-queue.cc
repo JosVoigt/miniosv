@@ -46,7 +46,7 @@ TRACEPOINT(trace_nvme_prp_alloc, "nvme%d qid=%d, prp=%p", int, int, void *);
 TRACEPOINT(trace_nvme_prp_free, "nvme%d qid=%d, prp=%p", int, int, void *);
 
 TRACEPOINT(trace_nvme_op_read, "payload=%lu addr=%d len=%d", unsigned long, void *, int);
-TRACEPOINT(trace_nvme_op_resread, "payload=%d cid=%d", int, int);
+TRACEPOINT(trace_nvme_op_done, "nvme%d qid=%d cid=%d sct=%d sc=%d", int, int, int, int, int);
 
 TRACEPOINT(trace_nvme_op_write, "nvme%d addr=%d len=%d", int, void *, int);
 
@@ -429,32 +429,15 @@ namespace nvme
                 auto old_sq_head = _sq._head.load();
                 _sq._head = cqe.sqhd;
 
-                if (cqe.sc != 0) {
-                    // Completion error. Before aborting, dump the failed command
-                    // and the page buffer it referenced: a bad PRP / invalid page
-                    // (the likely culprit) shows up here as garbage prp1 / magic.
-                    // NOTE: the SQ slot may already be reused; this is best-effort
-                    // diagnostics on a fatal path.
-                    u16 ecid = cqe.cid;
-                    nvme_sq_entry_t *failed = &_sq._addr[ecid % _qsize];
-                    printf("nvme completion error: sc=%d sct=%d cid=%d opc=%d "
-                           "slba=%lu nlb(1based)=%u prp1=0x%lx prp2=0x%lx\n",
-                           (int)cqe.sc, (int)cqe.sct, ecid,
-                           (int)failed->rw.common.opc, (unsigned long)failed->rw.slba,
-                           failed->rw.nlb + 1, (unsigned long)failed->rw.common.prp1,
-                           (unsigned long)failed->rw.common.prp2);
-                    if (failed->rw.common.prp1) {
-                        // prp1 -> the leanstore Page (offset 512 in its frame).
-                        // page[0]=GSN, page[2]=magic_debugging_number.
-                        auto *page = reinterpret_cast<u64 *>(
-                            mmu::phys_to_virt(failed->rw.common.prp1));
-                        printf("  page(phys->virt)=%p GSN=%lu magic=%lu "
-                               "(in-page offset=0x%lx)\n",
-                               (void *)page, (unsigned long)page[0],
-                               (unsigned long)page[2],
-                               (unsigned long)(failed->rw.common.prp1 & (NVME_PAGESIZE - 1)));
-                    }
-                    assert(false);
+                if (cqe.sct != 0 || cqe.sc != 0) {
+                    // Reported to the caller through the callback. The SQ slot
+                    // may already be reused, so the command fields are a best
+                    // effort.
+                    const nvme_sq_entry_t *failed = &_sq._addr[cqe.cid % _qsize];
+                    nvme_e("nvme%d: I/O error on queue %u: sct=%#x sc=%#x cid=%u "
+                           "opc=%#x slba=%lu nlb=%u", _driver_id, _id, cqe.sct,
+                           cqe.sc, cqe.cid, failed->rw.common.opc,
+                           (u64)failed->rw.slba, failed->rw.nlb + 1);
                 }
 
                 if (old_sq_head != cqe.sqhd && _sq_full)
@@ -470,14 +453,9 @@ namespace nvme
                 nvme::nvme_pending_req pending_callback = _pending_callbacks[cid_to_row(cid)][cid_to_col(cid)];
                 assert(_pending_callbacks_locks[cid_to_row(cid)][cid_to_col(cid)].compare_exchange_strong(expected, false));
 
-                // cb_args is opaque to the driver: only leanstore happens to put a
-                // size_t payload id at offset 0. Callers may pass any pointer
-                // (including nullptr, e.g. the DMA tests), so guard the deref.
-                trace_nvme_op_resread(
-                    pending_callback.cb.cb_args ? (int)((size_t*)pending_callback.cb.cb_args)[0] : 0,
-                    cid);
+                trace_nvme_op_done(_driver_id, _id, cid, cqe.sct, cqe.sc);
 
-                pending_callback.cb.cb(pending_callback.cb.cb_args, nullptr);
+                pending_callback.cb.cb(pending_callback.cb.cb_args, &cqe);
 
                 if (pending_callback.prp_list)
                 {
