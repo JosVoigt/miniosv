@@ -216,12 +216,10 @@ private:
     // Let us hold to allocated PRP pages but also limit to up 16 ones
     ring_spsc<u64*, unsigned, 16> _free_prp_lists;
 
-    // Vector of arrays of pointers to struct bio used to track bio associated
-    // with given command. The scheme to generate 16-bit 'cid' is -
-    // _sq._tail + N * qsize - where N is typically 0 and  is equal
-    // to a row in _pending_bios and _sq._tail is equal to a column.
-    // Given cid, we can easily identify a pending bio by calculating
-    // the row - cid / _qsize and column - cid % _qsize
+    // Rows of pending requests (callback and PRP list), one per command in
+    // flight. The 16-bit cid is _sq._tail + N * qsize, where N is typically 0
+    // and is the row, and _sq._tail is the column. Given a cid, its pending
+    // request is at row cid / _qsize, column cid % _qsize.
     nvme_pending_req* _pending_callbacks[max_pending_levels] = {};
     std::atomic<bool>* _pending_callbacks_locks[max_pending_levels] = {};
 };

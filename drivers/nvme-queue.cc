@@ -33,7 +33,6 @@ TRACEPOINT(trace_nvme_req_done_error, "nvme%d qid=%d, cid=%d, status type=%#x, s
 TRACEPOINT(trace_nvme_req_done_success, "nvme%d qid=%d, cid=%d, req=%p", int, int, u16, void *);
 
 TRACEPOINT(trace_nvme_admin_cmd_submit, "nvme%d qid=%d, cid=%d, opc=%d", int, int, int, u8);
-TRACEPOINT(trace_nvme_read_write_cmd_submit, "nvme%d qid=%d cid=%d, bio=%p, slba=%d, nlb=%d, write=%d", int, int, u16, void *, u64, u32, bool);
 
 TRACEPOINT(trace_nvme_sq_tail_advance, "nvme%d qid=%d, sq_tail=%d, sq_head=%d, depth=%d, full=%d", int, int, int, int, int, bool);
 TRACEPOINT(trace_nvme_sq_full_wait, "nvme%d qid=%d, sq_tail=%d, sq_head=%d", int, int, int, int);
@@ -277,7 +276,7 @@ namespace nvme
             // The PRP-list page itself must be 4K-aligned (it points at it).
             assert((cmd->rw.common.prp2 & (NVME_PAGESIZE - 1)) == 0);
 
-            // Save PRP list in bio so it can be de-allocated later
+            // Keep the PRP list with the pending request; it is recycled on completion
             pending_req->prp_list = prp_list;
 
             // Fill in the PRP list with the physical address of each subsequent
@@ -361,8 +360,8 @@ namespace nvme
         // 1. The SQ is full. Then we just have to wait for an open slot (see above)
         // 2. The Controller already read a SQE but didnt post a CQE yet.
         //    This means we could post the command but need a different cid. To still
-        //    use the cid as index to find the corresponding bios we use a matrix
-        //    adding columns if we need them
+        //    use the cid as index to find the pending request, they live in a matrix
+        //    with up to max_pending_levels rows
         u16 cid = _sq._tail;
 
         bool expected = false;
@@ -374,7 +373,7 @@ namespace nvme
                 return 0; // this should never be the case
         }
 
-        // Save bio
+        // Remember the caller's callback for the completion
         assert(cb_fn != nullptr);
         _pending_callbacks[cid_to_row(cid)][cid_to_col(cid)] = nvme_pending_req(cb_fn, cb_arg);
 
