@@ -162,13 +162,16 @@ def choose_pinning(options):
         return None
     return cpus
 
-def pin_vcpus(proc, cpus, timeout=10.0):
-    """Pin QEMU's vCPU thread n to host CPU cpus[n].
+def pin_vcpus(proc, cpus, others=None, timeout=10.0):
+    """Pin QEMU's vCPU thread n to host CPU cpus[n], and its other threads to
+    the host CPUs in others (if given); threads QEMU starts later inherit that
+    from the thread that starts them.
 
     The thread ids only exist once QEMU has created its vCPUs, so poll
     /proc/<pid>/task/*/comm (named 'CPU <n>/KVM' by debug-threads=on) until
     all are found, QEMU exits, or the timeout passes."""
     pinned = {}
+    vcpu_tids = set()
     deadline = time.monotonic() + timeout
     while len(pinned) < len(cpus) and time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -188,6 +191,7 @@ def pin_vcpus(proc, cpus, timeout=10.0):
             n = int(m.group(1))
             if n in pinned or n >= len(cpus):
                 continue
+            vcpu_tids.add(tid)
             try:
                 os.sched_setaffinity(int(tid), {cpus[n]})
                 pinned[n] = cpus[n]
@@ -203,6 +207,22 @@ def pin_vcpus(proc, cpus, timeout=10.0):
     # QEMU has the terminal in raw mode by now, hence the explicit \r.
     print("run.py: pinned vcpus %s; not found: %s" % (done or "none", missing),
           file=sys.stderr, end="\r\n")
+    if not others:
+        return
+    try:
+        tids = os.listdir('/proc/%d/task' % proc.pid)
+    except OSError:
+        return
+    for tid in tids:
+        if tid in vcpu_tids:
+            continue
+        try:
+            os.sched_setaffinity(int(tid), others)
+        except OSError as e:
+            print("run.py: pinning qemu thread %s failed: %s" % (tid, e.strerror),
+                  file=sys.stderr, end="\r\n")
+    print("run.py: other qemu threads on host CPUs %s"
+          % ",".join(map(str, sorted(others))), file=sys.stderr, end="\r\n")
 
 def start_osv_qemu(options):
     workdir = tempfile.mkdtemp(prefix='miniosv-run-')
@@ -213,6 +233,7 @@ def start_osv_qemu(options):
 
         use_kvm = options.hypervisor == 'kvm'
         pin_cpus = choose_pinning(options)
+        others = set(parse_cpu_list(options.pin_others)) if options.pin_others else None
 
         args = ["-m", options.memsize, "-smp", options.vcpus, "-no-reboot"]
 
@@ -284,7 +305,7 @@ def start_osv_qemu(options):
             proc = subprocess.Popen(cmdline, env=os.environ.copy())
             try:
                 if pin_cpus:
-                    pin_vcpus(proc, pin_cpus)
+                    pin_vcpus(proc, pin_cpus, others)
             finally:
                 ret = proc.wait()
             if ret != 0:
@@ -333,6 +354,9 @@ if __name__ == "__main__":
     parser.add_argument("--pin", action="store", metavar="HOSTCPUS",
                         help="pin vCPU i to the i-th host CPU of this list, e.g. "
                              "0-4,8,10-11 (default under KVM: 0-<vcpus-1>)")
+    parser.add_argument("--pin-others", action="store", metavar="HOSTCPUS",
+                        help="put QEMU's non-vCPU threads on these host CPUs, "
+                             "e.g. 0-3,8-11 (default: leave them)")
     parser.add_argument("--no-pin", action="store_true",
                         help="leave the vCPU threads to the host scheduler")
     parser.add_argument("-p", "--hypervisor", action="store", default="auto",
