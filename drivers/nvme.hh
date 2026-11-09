@@ -75,7 +75,10 @@ public:
   // Create an I/O queue pair of the given depth and return an opaque handle
   // (really an io_queue_pair*). target_interrupt_cpu pins the queue's MSI-X
   // completion interrupt; nullptr uses the current CPU.
-  void *create_io_queue(int qsize, sched::cpu *target_interrupt_cpu = nullptr);
+  // interrupts=false: no completion interrupt at all (CQ created with IEN=0);
+  // the caller polls the queue with process_completions().
+  void *create_io_queue(int qsize, sched::cpu *target_interrupt_cpu = nullptr,
+                        bool interrupts = true);
 
   // Largest single read or write, in bytes; submit_request() refuses larger.
   u32 max_transfer_bytes() const { return _max_transfer_bytes; }

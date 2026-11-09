@@ -629,7 +629,8 @@ int nvme_driver::set_apst(bool enable, u32 max_exit_latency_us) {
 // I/O queue management
 // ===========================================================================
 
-void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) {
+void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu,
+                                   bool interrupts) {
   assert(qsize > 1 && qsize < _qsize);
   size_t qid = ++_queue_id_counter;
   assert(qid < (1 << 16) && qid > 0);
@@ -650,8 +651,10 @@ void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) 
   nvme_acmd_create_cq_t cmd_cq;
   setup_create_io_queue_cmd<nvme_acmd_create_cq_t>(
       &cmd_cq, qid, qsize, NVME_ACMD_CREATE_CQ, queue->cq_phys_addr());
-  cmd_cq.iv = iv;
-  cmd_cq.ien = 1;
+  // Without interrupts the controller never signals this CQ (IEN=0); the
+  // caller polls it with process_completions().
+  cmd_cq.iv = interrupts ? iv : 0;
+  cmd_cq.ien = interrupts;
 
   // Submission queue command.
   nvme_acmd_create_sq_t cmd_sq;
@@ -667,15 +670,18 @@ void *nvme_driver::create_io_queue(int qsize, sched::cpu *target_interrupt_cpu) 
   qp->set_max_transfer(_max_transfer_bytes);
   _io_queues.push_back(std::move(queue));
 
-  if (!target_interrupt_cpu) {
-    target_interrupt_cpu = sched::cpu::current();
+  if (interrupts) {
+    if (!target_interrupt_cpu) {
+      target_interrupt_cpu = sched::cpu::current();
+    }
+    msix_register_completion_interrupt(iv, qp, target_interrupt_cpu);
   }
-  msix_register_completion_interrupt(iv, qp, target_interrupt_cpu);
 
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_cq);
   _admin_queue->submit_and_return_on_completion((nvme_sq_entry_t *)&cmd_sq);
 
-  nvme_d("nvme%d: created I/O queue pair qid %d, size %d", _id, qid, qsize);
+  nvme_d("nvme%d: created I/O queue pair qid %d, size %d, %s", _id, qid, qsize,
+         interrupts ? "interrupts" : "polled");
   return qp;
 }
 
