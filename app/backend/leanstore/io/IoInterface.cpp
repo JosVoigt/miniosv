@@ -7,17 +7,19 @@
 // -------------------------------------------------------------------------------------
 namespace mean
 {
-std::unique_ptr<RaidEnv<OsvEnv, OsvChannel, OsvIoReq>> IoInterface::_instance = nullptr;
+std::unique_ptr<RaidEnvironment> IoInterface::_instance = nullptr;
 // -------------------------------------------------------------------------------------
 RaidEnvironment& IoInterface::initInstance(IoOptions ioOptions)
 {
 #ifdef LEANSTORE_INCLUDE_OSV
    if (ioOptions.engine == "osv") {
       std::cout << "create osv iochannel" << std::endl;
-      _instance = std::unique_ptr<RaidEnv<OsvEnv, OsvChannel, OsvIoReq>>(new RaidEnv<OsvEnv, OsvChannel, OsvIoReq>(ioOptions));
+      _instance = std::unique_ptr<RaidEnvironment>(new RaidEnv<OsvEnv, OsvChannel, OsvIoReq>(ioOptions));
    } else
 #endif
-   {
+   if (ioOptions.engine == "mem") {
+      _instance = std::unique_ptr<RaidEnvironment>(new RaidEnv<MemEnv, MemChannel, OsvIoReq>(ioOptions));
+   } else {
       throw std::runtime_error("IoInterface: unsupported engine in OSv build: " + ioOptions.engine);
    }
    return *_instance;

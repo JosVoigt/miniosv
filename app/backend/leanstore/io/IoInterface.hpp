@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include "IoAbstraction.hpp"
 #include "impl/OsvImpl.hpp"
+#include "impl/MemImpl.hpp"
 #include "leanstore/concurrency/utils/MessageHandler.hpp"
 // -------------------------------------------------------------------------------------
 namespace mean
@@ -10,7 +11,7 @@ namespace mean
 // -------------------------------------------------------------------------------------
 class IoInterface
 {
-   static std::unique_ptr<RaidEnv<OsvEnv, OsvChannel, OsvIoReq>> _instance;
+   static std::unique_ptr<RaidEnvironment> _instance;
    IoInterface() = delete;
    IoInterface(const IoInterface&) = delete;
 
