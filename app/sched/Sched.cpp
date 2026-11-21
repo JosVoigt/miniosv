@@ -147,7 +147,13 @@ Request* Scheduler::next(int core)
    if (mailbox_[core]->try_pop(r)) {
       return r;
    }
-   // otherwise take a waiting request, under our own reservation
+   // otherwise take a waiting request, under our own reservation. Look before
+   // reserving: an idle slot polls here constantly, and reserving writes the
+   // core's free_slots line, which the placement reads for every request --
+   // with many idle cores that ping-pong slowed the generator down.
+   if (queue_->sizeApprox() == 0) {
+      return nullptr;
+   }
    auto& c = cores_[core];
    if (!c.tryReserve()) {
       return nullptr;  // all slots of this core are spoken for

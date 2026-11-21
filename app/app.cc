@@ -195,6 +195,11 @@ struct Generator {
     std::atomic<u64> t_measure_end{~0ull};
     u64 offered = 0;  // requests created in the measured window
     u64 dropped = 0;  // no free request or queue full (open loop overload)
+    // where the generator's time goes (measured window only)
+    u64 submit_tsc = 0;     // inside Scheduler::submit (placement + hand-off)
+    u64 submits = 0;
+    u64 pool_empty = 0;     // loop passes that found no free request
+    u64 loop_passes = 0;
 
     Generator(lsched::Scheduler& s, BTreeInterface<YCSBKey, YCSBPayload>& t, u64 tuples, int n)
         : sched(s), table(t), tuples(tuples), pool(n), free_list(n)
@@ -230,8 +235,11 @@ struct Generator {
                 now = next;  // arrival time is the scheduled one, not when we noticed
                 next += u64(gap(rng) * 1e9 / ns_per_tick);
             }
+            const bool measured = now >= begin;
+            loop_passes += measured;
             lsched::Request* r = nullptr;
             if (!free_list.try_pop(r)) {
+                pool_empty += measured;
                 if (cfg.rate > 0 && now >= begin) {
                     dropped++;  // open loop: the system can't keep up
                 }
@@ -243,7 +251,13 @@ struct Generator {
             if (r->t_arrive >= begin) {
                 offered++;
             }
-            if (!sched.submit(r)) {
+            const u64 s0 = mean::readTSC();
+            const bool ok = sched.submit(r);
+            if (measured) {
+                submit_tsc += mean::readTSC() - s0;
+                submits++;
+            }
+            if (!ok) {
                 free_list.try_push(r);
                 if (r->t_arrive >= begin) {
                     dropped++;
@@ -325,6 +339,10 @@ void report(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::CoreSt
                    h.quantile(0.999), h.max());
         }
     }
+    printf("lsched,gen,submits,submit_ns_mean,loop_passes,pool_empty_pct\n");
+    printf("lsched,gen,%lu,%.0f,%lu,%.1f\n", gen.submits,
+           gen.submits ? gen.submit_tsc * ns_per_tick / gen.submits : 0.0, gen.loop_passes,
+           gen.loop_passes ? 100.0 * gen.pool_empty / gen.loop_passes : 0.0);
     printf("lsched,core,id,vcpu,completed,placed,pulled,busy_pct\n");
     auto& cores = sched.cores();
     for (size_t c = 0; c < stats.size(); c++) {
@@ -336,6 +354,10 @@ void report(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::CoreSt
 
 void runBenchmark()
 {
+    // The store and everything using it end in this scope, before
+    // mean::env::shutdown() destroys the I/O environment: the store's
+    // destructor frees the buffer pool through it.
+    {
     LeanStore db;
     std::unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
     mean::task::scheduleTaskSync([&]() {
@@ -389,6 +411,7 @@ void runBenchmark()
     gen_thread->join();
 
     report(sched, gen, stats);
+    }
     printf("lsched: done\n");
     mean::env::shutdown();
 }
