@@ -76,7 +76,30 @@ class MemEnv
       memset(p, 0, rounded);
       return p;
    }
-   void* allocIoMemoryChecked(size_t size, size_t align) { return allocIoMemory(size, align); }
-   void freeIoMemory(void* ptr, size_t) { std::free(ptr); }
+   // Only the RAID layer calls this directly, for the write-back staging buffer
+   // of each of its 8192 requests per channel (the buffer pool goes through
+   // allocIoMemory). The mem engine never does I/O, so the buffers are never
+   // touched: all of them share one page. Allocating them for real took
+   // seconds per channel and hung the init at 26 workers.
+   void* allocIoMemoryChecked(size_t size, size_t align)
+   {
+      if (size > staging_size_) {
+         staging_ = allocIoMemory(size, align < 4096 ? 4096 : align);  // leaks the old one: tiny, once
+         staging_size_ = size;
+      }
+      return staging_;
+   }
+   void freeIoMemory(void* ptr, size_t)
+   {
+      // every channel hands back each of its 8192 staging buffers: all the
+      // same shared page, which outlives them
+      if (ptr != staging_) {
+         std::free(ptr);
+      }
+   }
+
+  private:
+   void* staging_ = nullptr;
+   size_t staging_size_ = 0;
 };
 }  // namespace mean
