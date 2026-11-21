@@ -115,6 +115,15 @@ def setup_pflash(arch, code, vars_, pflash_dir, workdir):
                 fh.truncate(64 * 1024 * 1024)
     return code_copy, vars_copy
 
+def set_boot_args(image, args):
+    """Store the application arguments in the boot image (scripts/setargs.py).
+
+    The image carries them in a reserved sector, so this rewrites the image in
+    place and must happen before QEMU opens it.
+    """
+    setargs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setargs.py")
+    subprocess.check_call([sys.executable, setargs, image, args])
+
 def parse_cpu_list(spec):
     "Parse a CPU list like '0-4,8,10-11' into a list, keeping the given order."
     cpus = []
@@ -219,6 +228,14 @@ def start_osv_qemu(options):
         # Name the QEMU threads so the vCPU threads can be found and pinned.
         if pin_cpus:
             args += ["-name", "miniosv,debug-threads=on"]
+
+        # Guest RAM from a file (e.g. a devdax device holding a NUMA node),
+        # instead of anonymous host memory.
+        if options.mem_path:
+            args += ["-object", "memory-backend-file,id=ram,size=%s,mem-path=%s,share=on,align=1G"
+                     % (options.memsize, options.mem_path),
+                     # q35 splits RAM at 4 GiB; keep that split 1 GiB aligned
+                     "-machine", "memory-backend=ram,max-ram-below-4g=2G"]
 
         # Machine, CPU and acceleration.
         if options.arch == 'x86_64':
@@ -389,6 +406,12 @@ if __name__ == "__main__":
     parser.add_argument("-s", "--symbolize", action="store_true",
                         help="after qemu exits, run any [backtrace] addresses "
                              "through llvm-symbolizer against loader.elf")
+    parser.add_argument("--mem-path", action="store", metavar="FILE",
+                        help="back guest RAM with this file or device, e.g. "
+                             "/dev/dax0.0 (size: --memsize, 1 GiB aligned)")
+    parser.add_argument("--args", action="store", metavar="STRING",
+                        help="application arguments, written into the boot "
+                             "image before starting (see scripts/setargs.py)")
     cmdargs = parser.parse_args()
     if cmdargs.pin and cmdargs.no_pin:
         parser.error("--pin and --no-pin are mutually exclusive")
@@ -405,5 +428,9 @@ if __name__ == "__main__":
 
     if cmdargs.hypervisor == "auto":
         cmdargs.hypervisor = choose_hypervisor(cmdargs.arch)
+
+    # Rewrite the image before QEMU opens it.
+    if cmdargs.args is not None:
+        set_boot_args(cmdargs.image_file, cmdargs.args)
 
     main(cmdargs)

@@ -674,6 +674,7 @@ objects += core/percpu.o
 objects += core/percpu-worker.o
 objects += core/shutdown.o
 objects += core/version.o
+objects += core/bootargs.o
 objects += core/waitqueue.o
 objects += core/chart.o
 objects += core/demangle.o
