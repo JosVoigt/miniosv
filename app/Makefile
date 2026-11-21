@@ -82,6 +82,9 @@ leanstore-srcs = \
 
 # Object paths mirror the source paths; the top Makefile prepends $(out)/ and
 # resolves each via the %.cc / %.cpp pattern rules.
+# The request scheduler (app/sched): policies behind Queue / Placement.
+leanstore-srcs += $(app-dir)/sched/Sched.cpp
+
 leanstore-objs = $(leanstore-srcs:%.cpp=%.o)
 
 # Boost.Context provides leanstore's user-space task switching. Boost ships no
@@ -160,6 +163,7 @@ arch-sysroot-includes =
 endif
 
 leanstore-includes = \
+    -I$(app-dir) \
     -I$(app-dir)/backend \
     -I$(app-dir)/shared-headers \
     -I$(TABULATE_INC) \
