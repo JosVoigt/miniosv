@@ -96,6 +96,10 @@ struct alignas(64) CoreStats {
    std::array<std::array<Histogram, kMetrics>, kMaxTypes> lat;
    uint64_t completed = 0;
    uint64_t busy_tsc = 0;  // sum of service times: how loaded the core was
+   // RAPL energy of this core over the measured window, read on the core
+   // itself at its start and end (raw counter values and TSC)
+   bool e_started = false, e_done = false;
+   uint64_t e_begin = 0, e_end = 0, e_begin_tsc = 0, e_end_tsc = 0;
 
    void record(const Request& r, double ns_per_tick)
    {

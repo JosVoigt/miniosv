@@ -25,6 +25,9 @@
  *                  in memory for the run
  *   io=mem         mem: no storage device, abort on any I/O; osv: NVMe
  *   load_tasks=16  tasks per worker for the load phase (ycsb)
+ *   sample_ms=100  period of the package power / temperature samples
+ *                  (RAPL and smn_passthrough's temperatures, if the host
+ *                  passes them through; printed after the run)
  *   task_stack_kib=1024  stack of every LeanStore task (guarded: an
  *                  overflow aborts with "task stack overflow")
  *
@@ -44,9 +47,11 @@
 #include "Units.hpp"
 
 #include <osv/bootargs.hh>
+#include <osv/perf.hh>
 #include <osv/sched.hh>
 
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +87,7 @@ struct Config {
     std::string io = "mem";
     int load_tasks = 16;
     int task_stack_kib = 1024;
+    int sample_ms = 100;  // power/temperature sampling period (generator)
 };
 
 std::unique_ptr<workload::Workload> wl;  // set by parseConfig
@@ -127,6 +133,7 @@ Config parseConfig()
     take("io", c.io);
     take("load_tasks", c.load_tasks);
     take("task_stack_kib", c.task_stack_kib);
+    take("sample_ms", c.sample_ms);
     // the rest belongs to the workload
     workload::Params params(kv);
     wl = workload::makeWorkload(c.workload, params);
@@ -199,6 +206,30 @@ struct Generator {
     u64 submits = 0;
     u64 pool_empty = 0;     // loop passes that found no free request
     u64 loop_passes = 0;
+    // power and temperature, sampled by the generator (warmup included)
+    struct Sample {
+        u64 tsc;
+        u64 pkg_raw;  // RAPL package counter (32 bits, wraps)
+        float tctl;
+        float ccd[8];
+    };
+    std::vector<Sample> samples;
+    u32 ccd_mask = 0;
+    // the generator's own core and the package over the measured window
+    u64 gen_e_begin = 0, gen_e_end = 0, pkg_e_begin = 0, pkg_e_end = 0;
+    u64 e_begin_tsc = 0, e_end_tsc = 0;
+
+    void sample(u64 now)
+    {
+        Sample s{};
+        s.tsc = now;
+        perf::rapl_read(perf::EnergyDomain::PKG, s.pkg_raw);
+        s.tctl = float(perf::temperature(perf::TempDomain::PKG));
+        for (int c = 0; c < 8; c++) {
+            s.ccd[c] = (ccd_mask & (1u << c)) ? float(perf::temperature_ccd(c)) : NAN;
+        }
+        samples.push_back(s);
+    }
 
     Generator(lsched::Scheduler& s, int n) : sched(s), pool(n), free_list(n)
     {
@@ -219,9 +250,29 @@ struct Generator {
         t_measure_end = end;
         u64 next = start;
 
+        const u64 sample_ticks = u64(cfg.sample_ms * 1e6 / ns_per_tick);
+        ccd_mask = perf::temperature_ccd_mask();
+        samples.reserve(size_t((cfg.run_s + cfg.warmup_s) * 1000 / cfg.sample_ms) + 16);
+        u64 next_sample = start;
+        bool in_window = false;
+
         for (;;) {
             u64 now = mean::readTSC();
+            if (now >= next_sample) {
+                sample(now);
+                next_sample += sample_ticks;
+            }
+            if (!in_window && now >= begin) {
+                in_window = true;
+                e_begin_tsc = now;
+                perf::rapl_read(perf::EnergyDomain::CORE, gen_e_begin);
+                perf::rapl_read(perf::EnergyDomain::PKG, pkg_e_begin);
+            }
             if (now >= end) {
+                e_end_tsc = now;
+                perf::rapl_read(perf::EnergyDomain::CORE, gen_e_end);
+                perf::rapl_read(perf::EnergyDomain::PKG, pkg_e_end);
+                sample(now);
                 break;
             }
             if (cfg.rate > 0) {
@@ -272,6 +323,20 @@ void slotLoop(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::Core
     const int core = mean::exec::getId();
     auto& st = stats[core];
     for (;;) {
+        {
+            // this core's energy over the measured window, read here on the core
+            const u64 now = mean::readTSC();
+            if (!st.e_started && gen.t_measure_begin != 0 && now >= gen.t_measure_begin) {
+                st.e_started = true;
+                st.e_begin_tsc = now;
+                perf::rapl_read(perf::EnergyDomain::CORE, st.e_begin);
+            }
+            if (st.e_started && !st.e_done && now >= gen.t_measure_end) {
+                st.e_done = true;
+                st.e_end_tsc = now;
+                perf::rapl_read(perf::EnergyDomain::CORE, st.e_end);
+            }
+        }
         lsched::Request* r = sched.next(core);
         if (!r) {
             if (gen.done && sched.drained()) {
@@ -292,6 +357,97 @@ void slotLoop(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::Core
         }
         gen.free_list.try_push(r);
         mean::task::yield();
+    }
+}
+
+// Energy (RAPL, via dvfs_passthrough) and temperature (smn_passthrough) of
+// the run. Package energy covers the whole socket (all its cores, uncore,
+// whatever else runs there); core energy is that of the physical core the
+// vCPU is pinned to.
+void reportPower(Generator& gen, std::vector<lsched::CoreStats>& stats)
+{
+    using perf::EnergyDomain;
+    auto joules = [](EnergyDomain d, u64 a, u64 b) {
+        return double((b - a) & 0xffffffffull) * perf::rapl_energy_unit(d);  // 32-bit counter
+    };
+    auto secs = [](u64 a, u64 b) { return (b - a) * ns_per_tick / 1e9; };
+    printf("lsched,energy,domain,vcpu,joules,seconds,avg_w\n");
+    if (perf::rapl_available(EnergyDomain::PKG)) {
+        double s = secs(gen.e_begin_tsc, gen.e_end_tsc);
+        double j = joules(EnergyDomain::PKG, gen.pkg_e_begin, gen.pkg_e_end);
+        printf("lsched,energy,package,-,%.3f,%.3f,%.2f\n", j, s, j / s);
+        if (perf::rapl_available(EnergyDomain::CORE)) {
+            j = joules(EnergyDomain::CORE, gen.gen_e_begin, gen.gen_e_end);
+            printf("lsched,energy,core_generator,%d,%.3f,%.3f,%.2f\n", cfg.gen_cpu, j, s, j / s);
+            for (size_t c = 0; c < stats.size(); c++) {
+                auto& st = stats[c];
+                if (!st.e_done) {
+                    continue;
+                }
+                s = secs(st.e_begin_tsc, st.e_end_tsc);
+                j = joules(EnergyDomain::CORE, st.e_begin, st.e_end);
+                printf("lsched,energy,core_worker%zu,%zu,%.3f,%.3f,%.2f\n", c, c + cfg.first_core, j, s, j / s);
+            }
+        }
+    } else {
+        printf("lsched,energy,unavailable (no RAPL: load dvfs_passthrough before the VM starts)\n");
+    }
+
+    // temperatures over the measured window
+    std::vector<std::pair<std::string, int>> sensors{{"tctl", -1}};
+    for (int c = 0; c < 8; c++) {
+        if (gen.ccd_mask & (1u << c)) {
+            sensors.push_back({"ccd" + std::to_string(c), c});
+        }
+    }
+    auto value = [](const Generator::Sample& smp, int sensor) { return sensor < 0 ? smp.tctl : smp.ccd[sensor]; };
+    printf("lsched,temp,sensor,start_c,end_c,min_c,mean_c,max_c\n");
+    for (auto& [name, idx] : sensors) {
+        double first = NAN, last = NAN, lo = 1e9, hi = -1e9, sum = 0;
+        int n = 0;
+        for (auto& smp : gen.samples) {
+            if (smp.tsc < gen.t_measure_begin || smp.tsc > gen.t_measure_end) {
+                continue;
+            }
+            const double v = value(smp, idx);
+            if (std::isnan(v)) {
+                continue;
+            }
+            if (n == 0) {
+                first = v;
+            }
+            last = v;
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+            sum += v;
+            n++;
+        }
+        if (n == 0) {
+            printf("lsched,temp,%s,nan,nan,nan,nan,nan\n", name.c_str());
+        } else {
+            printf("lsched,temp,%s,%.2f,%.2f,%.2f,%.2f,%.2f\n", name.c_str(), first, last, lo, sum / n, hi);
+        }
+    }
+
+    // the time series, warmup included (t < 0); package watts over each period
+    printf("lsched,sample,t_s,pkg_w");
+    for (auto& sn : sensors) {
+        printf(",%s_c", sn.first.c_str());
+    }
+    printf("\n");
+    for (size_t i = 0; i < gen.samples.size(); i++) {
+        auto& smp = gen.samples[i];
+        const double t = (double(smp.tsc) - double(gen.t_measure_begin.load())) * ns_per_tick / 1e9;
+        double w = NAN;
+        if (i > 0) {
+            auto& prev = gen.samples[i - 1];
+            w = joules(EnergyDomain::PKG, prev.pkg_raw, smp.pkg_raw) / secs(prev.tsc, smp.tsc);
+        }
+        printf("lsched,sample,%.3f,%.2f", t, w);
+        for (auto& sn : sensors) {
+            printf(",%.2f", value(smp, sn.second));
+        }
+        printf("\n");
     }
 }
 
@@ -337,6 +493,7 @@ void report(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::CoreSt
                cores[c].placed.load(), cores[c].pulled.load(),
                100.0 * stats[c].busy_tsc * ns_per_tick / 1e9 / secs);
     }
+    reportPower(gen, stats);
 }
 
 void runBenchmark()
