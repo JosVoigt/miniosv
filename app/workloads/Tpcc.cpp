@@ -37,6 +37,7 @@ using std::atomic;
 using std::cout;
 using std::endl;
 using std::function;
+using std::shuffle;
 using std::string;
 using namespace leanstore;
 // -------------------------------------------------------------------------------------

@@ -2,6 +2,8 @@
 #include "Exceptions.hpp"
 // -------------------------------------------------------------------------------------
 #include <atomic>
+#include "Time.hpp"
+#include <new>
 #include <random>
 // -------------------------------------------------------------------------------------
 // -------------------------------------------------------------------------------------
@@ -29,8 +31,62 @@ class MersenneTwister
 }  // namespace utils
 }  // namespace leanstore
 // -------------------------------------------------------------------------------------
-static leanstore::utils::MersenneTwister mt_generator;
-static std::mt19937 random_generator;
+// One generator of each kind per thread, as upstream (static thread_local).
+// This port had dropped the thread_local, so all executors shared one
+// generator and raced on its state: at 26 workers the TPC-C loader drew the
+// same customer names twice (duplicate key, abort in BTreeLL::insert).
+// The generators are built on first use in constinit TLS storage (no dynamic
+// TLS initialisation, like jumpmu's context) and seeded per thread, so that
+// threads don't all draw the same sequence. mt_generator and
+// random_generator stay as names: stateless forwarders to this thread's.
+namespace leanstore
+{
+namespace utils
+{
+namespace detail
+{
+struct TlsRng {
+   alignas(MersenneTwister) unsigned char mt[sizeof(MersenneTwister)];
+   alignas(std::mt19937) unsigned char std[sizeof(std::mt19937)];
+   bool ready;
+};
+inline constinit thread_local TlsRng tls_rng{};
+inline void tlsRngInit()
+{
+   const uint64_t seed = mean::readTSC() ^ reinterpret_cast<uintptr_t>(&tls_rng);
+   new (tls_rng.mt) MersenneTwister(seed);
+   new (tls_rng.std) std::mt19937(uint32_t(seed ^ (seed >> 32)));
+   tls_rng.ready = true;
+}
+inline MersenneTwister& mtGen()
+{
+   if (__builtin_expect(!tls_rng.ready, 0)) {
+      tlsRngInit();
+   }
+   return *std::launder(reinterpret_cast<MersenneTwister*>(tls_rng.mt));
+}
+inline std::mt19937& stdGen()
+{
+   if (__builtin_expect(!tls_rng.ready, 0)) {
+      tlsRngInit();
+   }
+   return *std::launder(reinterpret_cast<std::mt19937*>(tls_rng.std));
+}
+struct MtForward {
+   uint64_t rnd() { return mtGen().rnd(); }
+};
+struct StdForward {  // a UniformRandomBitGenerator
+   using result_type = std::mt19937::result_type;
+   static constexpr result_type min() { return std::mt19937::min(); }
+   static constexpr result_type max() { return std::mt19937::max(); }
+   result_type operator()() { return stdGen()(); }
+   void seed(result_type s) { stdGen().seed(s); }
+};
+}  // namespace detail
+}  // namespace utils
+}  // namespace leanstore
+static leanstore::utils::detail::MtForward mt_generator;
+static leanstore::utils::detail::StdForward random_generator;
 // -------------------------------------------------------------------------------------
 namespace leanstore
 {
