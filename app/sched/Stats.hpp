@@ -85,6 +85,7 @@ class Histogram
 };
 // -------------------------------------------------------------------------------------
 enum Metric { kTotal = 0, kWait = 1, kService = 2, kMetrics = 3 };
+constexpr int kMaxTypes = 8;  // = workload::Workload::kMaxTypes
 inline const char* metricName(int m)
 {
    static const char* n[] = {"total", "wait", "service"};
@@ -92,13 +93,13 @@ inline const char* metricName(int m)
 }
 // -------------------------------------------------------------------------------------
 struct alignas(64) CoreStats {
-   std::array<std::array<Histogram, kMetrics>, size_t(ReqType::COUNT)> lat;
+   std::array<std::array<Histogram, kMetrics>, kMaxTypes> lat;
    uint64_t completed = 0;
    uint64_t busy_tsc = 0;  // sum of service times: how loaded the core was
 
    void record(const Request& r, double ns_per_tick)
    {
-      auto& h = lat[size_t(r.type)];
+      auto& h = lat[r.type];
       h[kTotal].add(uint64_t((r.t_done - r.t_arrive) * ns_per_tick));
       h[kWait].add(uint64_t((r.t_start - r.t_arrive) * ns_per_tick));
       h[kService].add(uint64_t((r.t_done - r.t_start) * ns_per_tick));

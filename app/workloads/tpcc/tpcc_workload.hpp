@@ -1,4 +1,4 @@
-DEFINE_bool(order_wdc_index, true, "");
+bool FLAGS_order_wdc_index = true;  // was DEFINE_bool(order_wdc_index, true, "") (no gflags here)
 atomic<u64> scanned_elements = 0;
 
 // load

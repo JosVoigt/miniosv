@@ -1,5 +1,7 @@
 /*
- * LeanStore YCSB on miniOSv, as a test bed for request scheduling.
+ * LeanStore on miniOSv as a test bed for request scheduling: a workload
+ * (app/workloads: schema, initial data, request mix) is loaded, then a load
+ * generator feeds its requests through a scheduling policy (app/sched).
  *
  * Boot arguments (key=value, written into the image with
  * `scripts/run.py --args "..."` or scripts/setargs.py), defaults in brackets:
@@ -16,17 +18,19 @@
  *                  65536 (open loop)
  *   run=10         measured seconds
  *   warmup=1       seconds of load before measuring
- *   read=100       % lookups, the rest are updates
- *   zipf=0         key skew (0 = uniform)
- *   data_gib=1     YCSB data set (half of it is tuple payload, as before)
- *   dram_gib=0     buffer pool; 0 = enough to hold the data set in memory
+ *   workload=ycsb  ycsb or tpcc; their own arguments are documented in
+ *                  app/workloads/Ycsb.cpp and Tpcc.cpp (e.g. read=, zipf=,
+ *                  data_gib= / warehouses=, mix=)
+ *   dram_gib=0     buffer pool; 0 = what the workload says it needs to stay
+ *                  in memory for the run
  *   io=mem         mem: no storage device, abort on any I/O; osv: NVMe
- *   load_tasks=16  tasks per worker for the insert phase
+ *   load_tasks=16  tasks per worker for the load phase (ycsb)
+ *   task_stack_kib=1024  stack of every LeanStore task (guarded: an
+ *                  overflow aborts with "task stack overflow")
  *
  * Results go to the console as CSV lines starting with "lsched,".
  */
 
-#include "leanstore/BTreeAdapter.hpp"
 #include "leanstore/Config.hpp"
 #include "leanstore/LeanStore.hpp"
 #include "leanstore/utils/RandomGenerator.hpp"
@@ -35,6 +39,7 @@
 #include "leanstore/io/IoInterface.hpp"
 #include "sched/Sched.hpp"
 #include "sched/Stats.hpp"
+#include "workloads/Workload.hpp"
 #include "Time.hpp"
 #include "Units.hpp"
 
@@ -55,8 +60,6 @@
 
 using namespace leanstore;
 
-using YCSBKey = u64;
-using YCSBPayload = BytesPayload<120>;
 
 namespace
 {
@@ -74,13 +77,14 @@ struct Config {
     int inflight = 0;
     double run_s = 10;
     double warmup_s = 1;
-    int read = 100;
-    double zipf = 0;
-    double data_gib = 1;
+    std::string workload = "ycsb";
     double dram_gib = 0;
     std::string io = "mem";
     int load_tasks = 16;
+    int task_stack_kib = 1024;
 };
+
+std::unique_ptr<workload::Workload> wl;  // set by parseConfig
 
 Config parseConfig()
 {
@@ -118,23 +122,22 @@ Config parseConfig()
     take("inflight", c.inflight);
     take("run", c.run_s);
     take("warmup", c.warmup_s);
-    take("read", c.read);
-    take("zipf", c.zipf);
-    take("data_gib", c.data_gib);
+    take("workload", c.workload);
     take("dram_gib", c.dram_gib);
     take("io", c.io);
     take("load_tasks", c.load_tasks);
-    if (!kv.empty()) {
-        throw std::invalid_argument("unknown boot argument '" + kv.begin()->first + "'");
-    }
+    take("task_stack_kib", c.task_stack_kib);
+    // the rest belongs to the workload
+    workload::Params params(kv);
+    wl = workload::makeWorkload(c.workload, params);
+    params.requireEmpty();
     if (c.inflight <= 0) {
         // closed loop: keep every slot busy plus one waiting each;
         // open loop: large enough that only real overload drops requests
         c.inflight = c.rate > 0 ? 1 << 16 : 2 * c.workers * c.slots;
     }
     if (c.dram_gib <= 0) {
-        // pages hold ~0.75x data_gib of tuples; leave room for inner nodes
-        c.dram_gib = c.data_gib * 1.5 + 0.5;
+        c.dram_gib = wl->dramGib(c.run_s + c.warmup_s);
     }
     if (c.workers < 1 || c.slots < 1) {
         throw std::invalid_argument("workers and slots must be >= 1");
@@ -154,11 +157,9 @@ Config parseConfig()
 void applyConfig(const Config& c)
 {
     FLAGS_worker_threads = c.workers;
+    FLAGS_task_stack_kib = c.task_stack_kib;
     FLAGS_worker_tasks = c.load_tasks;
     FLAGS_dram_gib = c.dram_gib;
-    FLAGS_target_gib = c.data_gib;
-    FLAGS_ycsb_read_ratio = c.read;
-    FLAGS_zipf_factor = c.zipf;
     FLAGS_run_for_seconds = u64(c.run_s + c.warmup_s);
 }
 
@@ -186,8 +187,6 @@ double ns_per_tick = 0;
 // ---------------------------------------------------------------------------
 struct Generator {
     lsched::Scheduler& sched;
-    BTreeInterface<YCSBKey, YCSBPayload>& table;
-    u64 tuples;
     std::vector<lsched::Request> pool;
     leanstore::utils::RingBuffer<lsched::Request*> free_list;
     std::atomic<bool> done{false};
@@ -201,8 +200,7 @@ struct Generator {
     u64 pool_empty = 0;     // loop passes that found no free request
     u64 loop_passes = 0;
 
-    Generator(lsched::Scheduler& s, BTreeInterface<YCSBKey, YCSBPayload>& t, u64 tuples, int n)
-        : sched(s), table(t), tuples(tuples), pool(n), free_list(n)
+    Generator(lsched::Scheduler& s, int n) : sched(s), pool(n), free_list(n)
     {
         for (auto& r : pool) {
             free_list.try_push(&r);
@@ -211,9 +209,7 @@ struct Generator {
 
     void run()
     {
-        utils::ScrambledZipfGenerator zipf(0, tuples, cfg.zipf);
         std::mt19937_64 rng(mean::readTSC());
-        std::uniform_int_distribution<int> pct(0, 99);
         std::exponential_distribution<double> gap(cfg.rate > 0 ? cfg.rate : 1.0);
 
         const u64 start = mean::readTSC();
@@ -245,8 +241,7 @@ struct Generator {
                 }
                 continue;  // closed loop: wait for a request to come back
             }
-            r->type = pct(rng) < cfg.read ? lsched::ReqType::Lookup : lsched::ReqType::Update;
-            r->key = zipf.rand();
+            wl->make(*r, rng);  // type and argument
             r->t_arrive = cfg.rate > 0 ? now : mean::readTSC();
             if (r->t_arrive >= begin) {
                 offered++;
@@ -276,7 +271,6 @@ void slotLoop(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::Core
 {
     const int core = mean::exec::getId();
     auto& st = stats[core];
-    auto& table = gen.table;
     for (;;) {
         lsched::Request* r = sched.next(core);
         if (!r) {
@@ -288,14 +282,7 @@ void slotLoop(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::Core
         }
         r->core = core;
         r->t_start = mean::readTSC();
-        if (r->type == lsched::ReqType::Lookup) {
-            YCSBPayload result;
-            table.lookup(r->key, result);
-        } else {
-            YCSBPayload payload;
-            utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-            table.update(r->key, payload);
-        }
+        wl->execute(*r);
         r->t_done = mean::readTSC();
         sched.finished(core);
         if (r->t_arrive >= gen.t_measure_begin && r->t_done <= gen.t_measure_end) {
@@ -320,21 +307,21 @@ void report(lsched::Scheduler& sched, Generator& gen, std::vector<lsched::CoreSt
         }
         all.completed += s.completed;
     }
-    printf("lsched,config,workers=%d,slots=%d,queue=%s,place=%s,rate=%.0f,inflight=%d,run=%.1f,read=%d,"
-           "zipf=%.2f,data_gib=%.2f,dram_gib=%.2f,io=%s,tsc_ghz=%.3f\n",
+    printf("lsched,config,workers=%d,slots=%d,queue=%s,place=%s,rate=%.0f,inflight=%d,run=%.1f,"
+           "dram_gib=%.2f,io=%s,tsc_ghz=%.3f,workload=%s,%s\n",
            cfg.workers, cfg.slots, sched.queue().name(), sched.placement().name(), cfg.rate, cfg.inflight,
-           cfg.run_s, cfg.read, cfg.zipf, cfg.data_gib, cfg.dram_gib, cfg.io.c_str(), 1.0 / ns_per_tick);
+           cfg.run_s, cfg.dram_gib, cfg.io.c_str(), 1.0 / ns_per_tick, wl->name(), wl->describe().c_str());
     printf("lsched,summary,seconds,offered,completed,dropped,offered_rps,completed_rps\n");
     printf("lsched,summary,%.3f,%lu,%lu,%lu,%.0f,%.0f\n", secs, gen.offered, all.completed, gen.dropped,
            gen.offered / secs, all.completed / secs);
     printf("lsched,lat,type,metric,count,mean_ns,p50_ns,p90_ns,p99_ns,p999_ns,max_ns\n");
-    for (size_t t = 0; t < all.lat.size(); t++) {
+    for (int t = 0; t < wl->typeCount(); t++) {
         for (int m = 0; m < lsched::kMetrics; m++) {
             auto& h = all.lat[t][m];
             if (h.count() == 0) {
                 continue;
             }
-            printf("lsched,lat,%s,%s,%lu,%.0f,%lu,%lu,%lu,%lu,%lu\n", lsched::reqTypeName(lsched::ReqType(t)),
+            printf("lsched,lat,%s,%s,%lu,%.0f,%lu,%lu,%lu,%lu,%lu\n", wl->typeName(t),
                    lsched::metricName(m), h.count(), h.mean(), h.quantile(0.5), h.quantile(0.9), h.quantile(0.99),
                    h.quantile(0.999), h.max());
         }
@@ -359,36 +346,13 @@ void runBenchmark()
     // destructor frees the buffer pool through it.
     {
     LeanStore db;
-    std::unique_ptr<BTreeInterface<YCSBKey, YCSBPayload>> adapter;
-    mean::task::scheduleTaskSync([&]() {
-        auto& vs_btree = db.registerBTreeLL("ycsb", "y");
-        adapter.reset(new BTreeVSAdapter<YCSBKey, YCSBPayload>(vs_btree));
-    });
-    auto& table = *adapter;
-    const u64 tuples = cfg.data_gib * 1024.0 * 1024.0 * 1024.0 / 2.0 / (sizeof(YCSBKey) + sizeof(YCSBPayload));
+    mean::task::scheduleTaskSync([&]() { wl->setup(db); });
 
     // --- load -----------------------------------------------------------------
     {
-        printf("lsched: loading %lu tuples on %d workers\n", tuples, cfg.workers);
+        printf("lsched: loading %s on %d workers\n", wl->name(), cfg.workers);
         const u64 t0 = mean::readTSC();
-        std::atomic<u64> next_block{0};
-        const u64 block = 1 << 16;
-        auto insert = [&]() {
-            for (;;) {
-                const u64 b = next_block.fetch_add(block, std::memory_order_relaxed);
-                if (b >= tuples) {
-                    break;
-                }
-                const u64 e = std::min(b + block, tuples);
-                for (u64 k = b; k < e; k++) {
-                    YCSBPayload payload;
-                    utils::RandomGenerator::getRandString(reinterpret_cast<u8*>(&payload), sizeof(YCSBPayload));
-                    table.insert(k, payload);
-                }
-            }
-        };
-        BlockedRange bb(0, (u64)1);
-        mean::task::parallelFor(bb, insert, cfg.load_tasks, -1, false);
+        wl->load(db, cfg.workers, cfg.load_tasks);
         const u64 pages = db.getBufferManager().consumedPages();
         printf("lsched: loaded in %.2f s, %lu pages (%lu MiB)\n", (mean::readTSC() - t0) * ns_per_tick / 1e9, pages,
                pages * PAGE_SIZE / 1024 / 1024);
@@ -398,7 +362,7 @@ void runBenchmark()
     lsched::Scheduler sched(cfg.workers, cfg.slots, lsched::makeQueue(cfg.queue, 1 << 16),
                             lsched::makePlacement(cfg.place));
     std::vector<lsched::CoreStats> stats(cfg.workers);
-    Generator gen(sched, table, tuples, cfg.inflight);
+    Generator gen(sched, cfg.inflight);
 
     printf("lsched: run %.1f s (+%.1f s warmup), queue=%s place=%s rate=%.0f\n", cfg.run_s, cfg.warmup_s,
            sched.queue().name(), sched.placement().name(), cfg.rate);

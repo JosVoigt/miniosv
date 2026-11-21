@@ -41,12 +41,11 @@
 namespace lsched
 {
 // -------------------------------------------------------------------------------------
-enum class ReqType : uint8_t { Lookup = 0, Update = 1, COUNT };
-const char* reqTypeName(ReqType t);
-// -------------------------------------------------------------------------------------
+// A request: the workload (app/workloads) decides what type and arg mean,
+// e.g. YCSB lookup/update of key arg, TPC-C transaction type for warehouse arg.
 struct Request {
-   ReqType type = ReqType::Lookup;
-   uint64_t key = 0;
+   uint8_t type = 0;  // < workload::Workload::kMaxTypes
+   uint64_t arg = 0;
    // TSC timestamps: arrival at the scheduler, start and end of service
    uint64_t t_arrive = 0;
    uint64_t t_start = 0;

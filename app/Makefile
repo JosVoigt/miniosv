@@ -84,6 +84,10 @@ leanstore-srcs = \
 # resolves each via the %.cc / %.cpp pattern rules.
 # The request scheduler (app/sched): policies behind Queue / Placement.
 leanstore-srcs += $(app-dir)/sched/Sched.cpp
+# The workloads (app/workloads): schema, initial data, request mix.
+leanstore-srcs += $(app-dir)/workloads/Workload.cpp \
+                  $(app-dir)/workloads/Ycsb.cpp \
+                  $(app-dir)/workloads/Tpcc.cpp
 
 leanstore-objs = $(leanstore-srcs:%.cpp=%.o)
 

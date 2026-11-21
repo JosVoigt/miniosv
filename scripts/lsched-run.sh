@@ -101,7 +101,7 @@ fail() {
     exit 2
 }
 
-errors='Aborted|cfa=0x|\[backtrace\]|page fault|lsched: (unknown|need|gen_cpu|workers and|boot argument)|mem engine: .*I/O requested|terminate called|heap: '
+errors='Aborted|cfa=0x|\[backtrace\]|page fault|lsched: (unknown|need|gen_cpu|workers and|boot argument)|mem engine: .*I/O requested|terminate called|heap: |task stack overflow|null pointer'
 phase=boot deadline=$t_boot phase_start=$start
 next_phase() { # name deadline-seconds
     phase=$1 deadline=$2 phase_start=$(date +%s.%N)
