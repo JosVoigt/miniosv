@@ -5,7 +5,8 @@
 #
 # Boots build/release.x64/loader.img with workers+1 vCPUs (vCPU 0 = load
 # generator) pinned to $LSCHED_CPUS (default: host CPUs 28.. = gpu socket 1),
-# guest RAM from $LSCHED_MEM_PATH (default /dev/dax0.0 if writable),
+# guest RAM from $LSCHED_MEM_PATH (default /dev/dax0.0 if writable; none =
+# anonymous host RAM),
 # $LSCHED_MEM (default 8G). Always through scripts/run.py, i.e. with its
 # seccomp-BPF io_uring workaround (#70).
 #
@@ -49,7 +50,31 @@ t_run=$(awk -v r="$run_s" -v w="$warmup_s" -v s="$t_slack" 'BEGIN { printf "%d",
 
 mkdir -p "$(dirname "$log")"
 : > "$log"
+
+# The host clock of the cores we use. On isolated nohz_full cores schedutil
+# hardly ever runs, so each core keeps whatever clock it last had: up to 2x
+# run-to-run difference. Record it; warn unless the governor is performance.
+expand_cpus() { # 28-32,40 -> 28 29 30 31 32 40
+    local part out=()
+    for part in ${1//,/ }; do
+        if [[ $part == *-* ]]; then out+=($(seq "${part%-*}" "${part#*-}")); else out+=("$part"); fi
+    done
+    echo "${out[@]}"
+}
+envline="ENV"
+govs=""
+for c in $(expand_cpus "$cpus"); do
+    f=/sys/devices/system/cpu/cpu$c/cpufreq
+    g=$(cat $f/scaling_governor 2>/dev/null || echo ?)
+    envline+=" cpu$c=$g@$(( $(cat $f/scaling_cur_freq 2>/dev/null || echo 0) / 1000 ))MHz"
+    govs+=" $g"
+done
+echo "$envline" >> "$log"
+if grep -qv performance <<<"$(tr ' ' '\n' <<<"${govs# }")"; then
+    echo "WARN governor not performance on all cores:$(tr ' ' '\n' <<<"${govs# }" | sort | uniq -c | tr '\n' ' ')"
+fi
 memargs=()
+[ "$mem_path" = none ] && mem_path=   # LSCHED_MEM_PATH=none: anonymous RAM
 [ -n "$mem_path" ] && memargs=(--mem-path "$mem_path")
 # devdax keeps the previous guest's RAM, and OVMF hangs on such a dirty boot
 # (spins on vCPU 0 before printing anything): clear the region first.
@@ -62,7 +87,7 @@ if [[ "$mem_path" == /dev/dax* ]]; then
     fi
 fi
 setsid python3 "$here/run.py" -m "$mem" -c $((workers + 1)) --pin "$cpus" "${memargs[@]}" \
-    --nogdb --args "workers=$workers $args" "$@" < /dev/null > "$log" 2>&1 &
+    --nogdb --args "workers=$workers $args" "$@" < /dev/null >> "$log" 2>&1 &
 pid=$!
 
 start=$(date +%s.%N)

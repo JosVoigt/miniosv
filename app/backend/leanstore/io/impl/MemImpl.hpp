@@ -8,7 +8,8 @@
 // read or write -- so a run that silently starts evicting fails loudly instead
 // of mixing I/O into a CPU-scheduling measurement.
 // -------------------------------------------------------------------------------------
-#include "./Osv.hpp"  // OsvIoReq, the request payload the RAID layer carries
+#include "./Osv.hpp"
+#include <osv/mem/mapping.hh>  // OsvIoReq, the request payload the RAID layer carries
 #include "../IoAbstraction.hpp"
 // -------------------------------------------------------------------------------------
 #include <cstdio>
@@ -74,6 +75,11 @@ class MemEnv
          throw std::runtime_error("mem engine: out of memory");
       }
       memset(p, 0, rounded);
+      if (size >= (64ull << 20)) {  // the buffer pool: where it lands matters (diagnostics)
+         auto* b = static_cast<char*>(p);
+         printf("mem engine: %zu MiB at virt %p..%p phys %#lx..%#lx\n", size >> 20, p, b + rounded - 1,
+                (unsigned long)mem::mapping::to_phys(p), (unsigned long)mem::mapping::to_phys(b + rounded - 1));
+      }
       return p;
    }
    // Only the RAID layer calls this directly, for the write-back staging buffer
