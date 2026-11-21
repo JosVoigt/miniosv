@@ -25,7 +25,18 @@ void page_fault(exception_frame *ef)
     }
     auto pc = reinterpret_cast<void*>(ef->rip);
     if (!pc) {
-        abort("trying to execute null pointer");
+        // A call through a null pointer leaves its return address on top of
+        // the stack: that names the caller, which the backtrace (stuck in the
+        // fault entry) does not.
+        auto *sp = reinterpret_cast<void **>(ef->rsp);
+        if (sp) {
+            for (int i = 0; i < 16; i++) {
+                debug_early_u64("  stack word ", reinterpret_cast<u64>(sp[i]));
+            }
+        }
+        abort("trying to execute null pointer (thread '%s', caller %p, rsp %p, rbp %p)",
+              sched::thread::current()->name().c_str(), sp ? sp[0] : nullptr, sp,
+              reinterpret_cast<void *>(ef->rbp));
     }
     // The following code may sleep. So let's verify the fault did not happen
     // when preemption was disabled, or interrupts were disabled.

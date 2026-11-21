@@ -6,6 +6,7 @@
 #include "Time.hpp"
 #include "leanstore/concurrency/utils/MessageHandler.hpp"
 #include "leanstore/concurrency/utils/ThreadBase.hpp"
+#include "leanstore/Config.hpp"
 #include "leanstore/concurrency/Mean.hpp"
 #include "leanstore/concurrency-recovery/Worker.hpp"
 #include "leanstore/profiling/counters/CPUCounters.hpp"
@@ -16,6 +17,11 @@
 #include "boost/context/continuation.hpp"
 // -------------------------------------------------------------------------------------
 #include <boost/context/preallocated.hpp>
+#include <boost/context/stack_context.hpp>
+#include <osv/mem/mapping.hh>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +52,46 @@ TaskExecutor::TaskExecutor(MessageHandler& msg, IoChannel& ioChannel, int id)
 }
 TaskExecutor::~TaskExecutor() {}
 // -------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------
+// Task stacks. Upstream LeanStore gave every task 8 MiB; this port had cut it to
+// 64 KiB, which TPC-C overflows (B-tree splits keep page-sized buffers on the
+// stack) -- silently: the stack is a heap block, so the overflow wrote into the
+// neighbouring heap and only showed up later as a broken free or a jump to
+// address 0. Now the size is FLAGS_task_stack_kib, and below every stack lie
+// kGuard bytes mapped without access: an overflow faults right where it
+// happens ("page fault outside application", the address inside the guard).
+// The guard is larger than one page because single frames are (page-sized
+// buffers), and could jump over a smaller one. Page faults run on the
+// thread's exception stack, so the fault is reported even with rsp in the
+// guard.
+namespace
+{
+constexpr size_t kGuard = 64 * 1024;
+
+struct TaskStack {
+   size_t size;
+
+   boost::context::stack_context allocate()
+   {
+      auto* lo = static_cast<char*>(std::aligned_alloc(mem::mapping::page_size, kGuard + size));
+      if (!lo) {
+         throw std::bad_alloc();
+      }
+      mem::mapping::protect({uintptr_t(lo), uintptr_t(lo) + kGuard}, mem::perm_none);
+      boost::context::stack_context sctx;
+      sctx.size = size;
+      sctx.sp = lo + kGuard + size;
+      return sctx;
+   }
+   void deallocate(boost::context::stack_context& sctx) noexcept
+   {
+      char* lo = static_cast<char*>(sctx.sp) - sctx.size - kGuard;
+      mem::mapping::protect({uintptr_t(lo), uintptr_t(lo) + kGuard}, mem::perm_rw);
+      std::free(lo);
+   }
+};
+}  // namespace
+// -------------------------------------------------------------------------------------
 void TaskExecutor::runUserThread(Task& task)
 {
    // std::cout << "runUserThread swap oucp: " << std::hex <<  current_uctx << " ucp: " << &th->context  << std::dec <<  std::endl << std::flush;
@@ -57,7 +103,7 @@ void TaskExecutor::runUserThread(Task& task)
       // std::cout << "xx runUserThread init " << std::endl;
       task.context.init = true;
       task.context.this_task_context =
-          boost::context::callcc(std::allocator_arg, boost::context::fixedsize_stack(64 * 1024), [&task](boost::context::continuation&& sink) {
+          boost::context::callcc(std::allocator_arg, TaskStack{size_t(FLAGS_task_stack_kib) * 1024}, [&task](boost::context::continuation&& sink) {
              // task.context.this_task_context = boost::context::callcc([&task](boost::context::continuation&& sink_process_context){
              // std::cout << "callcc lamda " <<std::endl << std::flush;
              task.context.sink_process_context = &sink;

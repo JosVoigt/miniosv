@@ -14,6 +14,7 @@
 extern std::string FLAGS_free_pages_list_path;
 // -------------------------------------------------------------------------------------
 extern double FLAGS_dram_gib;
+extern u32 FLAGS_task_stack_kib;  // stack of every LeanStore task (coroutine)
 extern double FLAGS_ssd_gib;
 extern u32 FLAGS_cool_pct;
 extern u32 FLAGS_free_pct;

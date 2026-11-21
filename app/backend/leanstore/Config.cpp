@@ -10,6 +10,10 @@
 std::string FLAGS_free_pages_list_path = "leanstore_free_pages";
 // -------------------------------------------------------------------------------------
 double FLAGS_dram_gib = 1;
+// Upstream used 8 MiB per task; 64 KiB overflowed in TPC-C. Every stack has a
+// guard zone mapped without access (TaskExecutor.cpp), so too small faults
+// right away instead of corrupting the heap.
+u32 FLAGS_task_stack_kib = 1024;
 double FLAGS_ssd_gib = 1700;
 u32 FLAGS_cool_pct = 10;            // Start cooling pages when <= x% are free
 u32 FLAGS_free_pct = 1;
