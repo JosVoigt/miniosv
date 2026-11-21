@@ -62,6 +62,55 @@ LeanStoreAdapter<orderline_t> orderline;
 LeanStoreAdapter<item_t> item;
 LeanStoreAdapter<stock_t> stock;
 
+// The transactions build small vectors (new-order four per call, stock-level
+// and the by-name lookups one). On miniOSv every heap allocation takes one
+// global lock: at 26 workers 95 % of heap operations found it taken and TPC-C
+// collapsed to 9k tx/s. So `vector` in upstream's code below means this
+// stack-backed vector: 300 entries inline (stock-level's worst case, 20 orders
+// x 15 lines), the heap only beyond that (the loader's 3000 customer ids).
+template <class T, size_t N>
+class InlineVec
+{
+   T inline_[N];
+   std::vector<T> heap_;  // used once more than N entries are needed
+   T* data_ = inline_;
+   size_t size_ = 0;
+
+  public:
+   InlineVec() = default;
+   InlineVec(const InlineVec&) = delete;
+   InlineVec& operator=(const InlineVec&) = delete;
+   void reserve(size_t) {}
+   void push_back(const T& v)
+   {
+      if (size_ == N && data_ == inline_) {
+         heap_.assign(inline_, inline_ + N);
+      }
+      if (data_ != inline_ || size_ == N) {
+         heap_.push_back(v);
+         data_ = heap_.data();
+      } else {
+         inline_[size_] = v;
+      }
+      size_++;
+   }
+   void clear()
+   {
+      heap_.clear();
+      data_ = inline_;
+      size_ = 0;
+   }
+   size_t size() const { return size_; }
+   T& operator[](size_t i) { return data_[i]; }
+   const T& operator[](size_t i) const { return data_[i]; }
+   T* begin() { return data_; }
+   T* end() { return data_ + size_; }
+   const T* begin() const { return data_; }
+   const T* end() const { return data_ + size_; }
+};
+template <class T>
+using vector = InlineVec<T, 300>;
+
 // upstream's "dirty include" (tpcc.cpp): it uses the tables above
 #include "tpcc/tpcc_workload.hpp"
 }  // namespace

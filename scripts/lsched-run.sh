@@ -15,7 +15,8 @@
 # Every phase has a deadline; on a miss, an abort or an error the VM is killed:
 #   boot   "Booted up"          within LSCHED_T_BOOT (15 s)
 #   init   "lsched: loading"    within LSCHED_T_INIT (10 s) after boot
-#   load   "lsched: loaded"     within 10 s + 15 s per GiB of data_gib
+#   load   "lsched: loaded"     within 10 s + 15 s per GiB of data_gib (ycsb)
+#                                + 4 s per TPC-C warehouse
 #   run    "lsched: done"       within warmup + run + LSCHED_T_SLACK (15 s)
 # Prints one line per event, for a monitor to follow:
 #   PHASE <name> <seconds since start>
@@ -45,7 +46,8 @@ argval() { # key default
 data_gib=$(argval data_gib 1)
 run_s=$(argval run 10)
 warmup_s=$(argval warmup 1)
-t_load=$(awk -v g="$data_gib" 'BEGIN { printf "%d", 10 + 15 * g + 0.999 }')
+warehouses=$(argval warehouses 0)
+t_load=$(awk -v g="$data_gib" -v w="$warehouses" 'BEGIN { printf "%d", 10 + 15 * g + 4 * w + 0.999 }')
 t_run=$(awk -v r="$run_s" -v w="$warmup_s" -v s="$t_slack" 'BEGIN { printf "%d", r + w + s + 0.999 }')
 
 mkdir -p "$(dirname "$log")"
