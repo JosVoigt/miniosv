@@ -80,11 +80,15 @@ class BTreePessimisticIterator : public BTreePessimisticIteratorInterface
          btree.findLeafAndLatch<mode>(leaf, key.data(), key.length());
       }
       cur = leaf->lowerBound<false>(key.data(), key.length());
-      if (cur == leaf->count) {
-         return OP_RESULT::NOT_FOUND;
-      } else {
+      if (cur < leaf->count) {
          return OP_RESULT::OK;
       }
+      // The first key >= `key` can be in a later leaf: with composite keys a
+      // lookup for {2, 0} lands in a leaf of {1, ...} whose upper fence lies
+      // beyond {2, 0} (TPC-C new-order: delivery found no new orders once the
+      // start of a district's range had been delivered). As upstream master
+      // (301cf9c): go on with next().
+      return next();
    }
    // -------------------------------------------------------------------------------------
    virtual OP_RESULT seekForPrev(Slice key) override
@@ -113,13 +117,15 @@ class BTreePessimisticIterator : public BTreePessimisticIteratorInterface
       if ((cur + 1) < leaf->count) {
          cur += 1;
          return OP_RESULT::OK;
-      } else {
-         if (nextLeaf() && leaf->count > 0) {
+      }
+      // the next leaf with an entry; empty leaves are skipped (as upstream
+      // master's next(), which loops)
+      while (nextLeaf()) {
+         if (cur < leaf->count) {
             return OP_RESULT::OK;
-         } else {
-            return OP_RESULT::NOT_FOUND;
          }
       }
+      return OP_RESULT::NOT_FOUND;
    }
    // -------------------------------------------------------------------------------------
    virtual OP_RESULT prev() override
