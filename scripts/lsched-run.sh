@@ -11,7 +11,8 @@
 # seccomp-BPF io_uring workaround (#70).
 #
 # A devdax region is zeroed first (scripts/dax-zero.py): it keeps the last
-# guest's RAM, and OVMF hangs on that.
+# guest's RAM, and OVMF hangs on that. OVMF's variable store starts fresh
+# for every boot (a killed VM can leave it broken, with the same hang).
 # Every phase has a deadline; on a miss, an abort or an error the VM is killed:
 #   boot   "Booted up"          within LSCHED_T_BOOT (15 s)
 #   init   "lsched: loading"    within LSCHED_T_INIT (10 s) after boot
@@ -88,6 +89,12 @@ if [[ "$mem_path" == /dev/dax* ]]; then
         exit 2
     fi
 fi
+# OVMF's variable store (vars.fd next to the image) persists across boots
+# with run.py. A VM killed while OVMF writes it (the watchdog does kill VMs)
+# can leave it in a state where every later boot hangs the same way as the
+# dirty dax region: start each boot from the pristine template instead.
+image_dir=$(dirname "$(readlink -f "$(grep -oE -- '--image-path=[^ ]+' <<<"$*" | cut -d= -f2 | grep . || echo "$here/../build/release.x64/loader.img")")")
+rm -f "$image_dir/vars.fd"
 setsid python3 "$here/run.py" -m "$mem" -c $((workers + 1)) --pin "$cpus" "${memargs[@]}" \
     --nogdb --args "workers=$workers $args" "$@" < /dev/null >> "$log" 2>&1 &
 pid=$!
