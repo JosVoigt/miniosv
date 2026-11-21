@@ -48,6 +48,12 @@ namespace tabulate {
 #if defined(__unix__) || defined(__unix) || defined(__APPLE__)
 inline int get_wcswidth(const std::string &string, const std::string &locale,
                         size_t max_column_width) {
+#ifdef IS_OSV
+  // miniOSv's libc has no wcswidth: report "unknown" so the caller falls
+  // back to counting UTF-8 code points.
+  (void)string; (void)locale; (void)max_column_width;
+  return -1;
+#else
   if (string.size() == 0)
     return 0;
 
@@ -69,6 +75,7 @@ inline int get_wcswidth(const std::string &string, const std::string &locale,
   std::locale::global(old_locale);
 
   return result;
+#endif
 }
 #endif
 

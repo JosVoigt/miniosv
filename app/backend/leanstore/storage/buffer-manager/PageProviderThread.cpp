@@ -11,7 +11,6 @@
 #include "leanstore/storage/buffer-manager/Swip.hpp"
 #include "leanstore/utils/Parallelize.hpp"
 
-#include <gflags/gflags.h>
 
 #include <algorithm>
 #include <cassert>

@@ -44,12 +44,4 @@ transfer_t ontop_fcontext(fcontext_t to, void* vp, transfer_t (*fn)(transfer_t))
 
 // make_fcontext's "finish" path - reached only if a context-function returns
 // instead of switching away (it never does in normal use) - calls _exit, which
-// OSv's baremetal libc does not provide. Define it self-contained so we neither
-// require an _exit nor pull in llvm-libc's exit machinery (which expects an OS
-// hook the kernel does not supply): just trap hard, since reaching here is a bug.
-extern "C" __attribute__((noreturn)) void _exit(int /*status*/)
-{
-   __builtin_trap();
-   for (;;) {
-   }
-}
+// the kernel provides in runtime.cc.

@@ -136,8 +136,10 @@ struct PerfEvent {
    {
       for (unsigned i = 0; i < events.size(); i++) {
          auto& event = events[i];
+#ifndef IS_OSV  // no ioctl in miniOSv's libc; the event list is empty there anyway
          ioctl(event.fd, PERF_EVENT_IOC_RESET, 0);
          ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
+#endif
          if (read(event.fd, &event.prev, sizeof(uint64_t) * 3) != sizeof(uint64_t) * 3)
             std::cerr << "Error reading counter " << names[i] << std::endl;
       }
@@ -158,7 +160,9 @@ struct PerfEvent {
          auto& event = events[i];
          if (read(event.fd, &event.data, sizeof(uint64_t) * 3) != sizeof(uint64_t) * 3)
             std::cerr << "Error reading counter " << names[i] << std::endl;
+#ifndef IS_OSV  // no ioctl in miniOSv's libc; the event list is empty there anyway
          ioctl(event.fd, PERF_EVENT_IOC_DISABLE, 0);
+#endif
       }
    }
 
