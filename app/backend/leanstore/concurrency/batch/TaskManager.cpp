@@ -344,8 +344,15 @@ void TaskManager::parallelFor(BlockedRange bb, TaskFunction fun, const int tasks
    // yield, and push to waitingTasks
    TaskExecutor::localExec().yieldCurrentTask(TaskState::Waiting);
 
+   // The last task wakes us before its own context has returned (it sends
+   // the wake-up from inside the task); deleting it then destroys a suspended
+   // boost continuation, which throws forced_unwind and aborts. Wait until
+   // every executor is done with its task.
    for (auto* task : open_tasks) {
-      delete task; 
+      while (!task->finished.load(std::memory_order_acquire)) {
+         TaskExecutor::localExec().yieldCurrentTask(TaskState::Ready);
+      }
+      delete task;
    }
    std::cout << "parallel for done" << std::endl;
 }

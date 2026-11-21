@@ -183,6 +183,8 @@ void TaskExecutor::cycle()
                COUNTERS_BLOCK() { leanstore::ThreadCounters::myCounters().exec_tasks_st_comp++; }
                //memset((void*)task, 0, sizeof(Task));
                //delete task; //FIXME
+               // last touch of the task by this executor (see Task::finished)
+               task->finished.store(true, std::memory_order_release);
                break;
             case TaskState::Waiting:
                COUNTERS_BLOCK() { leanstore::ThreadCounters::myCounters().exec_tasks_st_wait++; }

@@ -72,6 +72,9 @@ class Task
    // the task has yielded (the doorbell is rung inside submit). Both sides
    // fetch_add; whichever comes second makes the task ready (moveReady).
    std::atomic<int> io_handoff{0};
+   // Set by the executor once the task's context has returned and the executor
+   // is done with it: only then may its owner delete it (parallelFor).
+   std::atomic<bool> finished{false};
    // -------------------------------------------------------------------------------------
    TaskState getState();
 };
