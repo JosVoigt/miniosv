@@ -2,6 +2,12 @@
 # Run one LeanStore scheduler experiment under a watchdog.
 #
 #     scripts/lsched-run.sh <log> <workers> "<boot args>" [run.py args...]
+#     LSCHED_APP=quack scripts/lsched-run.sh <log> <vcpus> "<boot args>" --image-path=<quack.img>
+#
+# LSCHED_APP=quack runs gyro's Quack benchmark (DuckDB behind a simulated NIC)
+# instead: <vcpus> = threads + conns, the boot arguments go in as they are,
+# and the phases are its own (boot, init until QUACK,config, load = dbgen
+# until QUACK,serve, run until "Quack: DONE"; "Quack: FAILURE" is an error).
 #
 # Boots build/release.x64/loader.img with workers+1 vCPUs (vCPU 0 = load
 # generator) pinned to $LSCHED_CPUS (default: host CPUs 28.. = gpu socket 1),
@@ -26,10 +32,18 @@
 set -uo pipefail
 here=$(dirname "$(readlink -f "$0")")
 log=$1 workers=$2 args=$3
+app=${LSCHED_APP:-lsched}
+case $app in
+lsched) vcpus=$((workers + 1)) bootargs="workers=$workers $args"
+        m_init='lsched: loading' m_load='lsched: loaded' m_done='lsched: done' ;;
+quack)  vcpus=$workers bootargs=$args
+        m_init='QUACK,config' m_load='QUACK,serve' m_done='######## Quack: DONE' ;;
+*) echo "LSCHED_APP=$app: lsched or quack" >&2; exit 2 ;;
+esac
 shift 3
 
 cpus_first=${LSCHED_CPUS_FIRST:-28}
-cpus=${LSCHED_CPUS:-$cpus_first-$((cpus_first + workers))}
+cpus=${LSCHED_CPUS:-$cpus_first-$((cpus_first + vcpus - 1))}
 mem=${LSCHED_MEM:-8G}
 mem_path=${LSCHED_MEM_PATH:-}
 if [ -z "$mem_path" ] && [ -w /dev/dax0.0 ]; then
@@ -50,6 +64,13 @@ warmup_s=$(argval warmup 1)
 warehouses=$(argval warehouses 0)
 t_load=$(awk -v g="$data_gib" -v w="$warehouses" 'BEGIN { printf "%d", 10 + 15 * g + 4 * w + 0.999 }')
 t_run=$(awk -v r="$run_s" -v w="$warmup_s" -v s="$t_slack" 'BEGIN { printf "%d", r + w + s + 0.999 }')
+if [ "$app" = quack ]; then
+    # dbgen, then (verify=1) every query once, then idle + warmup + duration + idle and the output
+    sf=$(argval sf 1)
+    t_load=$(awk -v f="$sf" 'BEGIN { printf "%d", 20 + 30 * f + 0.999 }')
+    t_run=$(awk -v d="$(argval duration 30)" -v w="$(argval warmup 5)" -v i="$(argval idle 5)" -v f="$sf" \
+        'BEGIN { printf "%d", d + w + 2 * i + 60 + 30 * f + 0.999 }')
+fi
 
 mkdir -p "$(dirname "$log")"
 : > "$log"
@@ -95,8 +116,8 @@ fi
 # dirty dax region: start each boot from the pristine template instead.
 image_dir=$(dirname "$(readlink -f "$(grep -oE -- '--image-path=[^ ]+' <<<"$*" | cut -d= -f2 | grep . || echo "$here/../build/release.x64/loader.img")")")
 rm -f "$image_dir/vars.fd"
-setsid python3 "$here/run.py" -m "$mem" -c $((workers + 1)) --pin "$cpus" "${memargs[@]}" \
-    --nogdb --args "workers=$workers $args" "$@" < /dev/null >> "$log" 2>&1 &
+setsid python3 "$here/run.py" -m "$mem" -c "$vcpus" --pin "$cpus" "${memargs[@]}" \
+    --nogdb --args "$bootargs" "$@" < /dev/null >> "$log" 2>&1 &
 pid=$!
 
 start=$(date +%s.%N)
@@ -110,7 +131,7 @@ fail() {
     exit 2
 }
 
-errors='Aborted|cfa=0x|\[backtrace\]|page fault|lsched: (unknown|need|gen_cpu|workers and|boot argument)|mem engine: .*I/O requested|terminate called|heap: |task stack overflow|null pointer'
+errors='Aborted|######## Quack: FAILURE|quack: |cfa=0x|\[backtrace\]|page fault|lsched: (unknown|need|gen_cpu|workers and|boot argument)|mem engine: .*I/O requested|terminate called|heap: |task stack overflow|null pointer'
 phase=boot deadline=$t_boot phase_start=$start
 next_phase() { # name deadline-seconds
     phase=$1 deadline=$2 phase_start=$(date +%s.%N)
@@ -119,7 +140,7 @@ next_phase() { # name deadline-seconds
 echo "PHASE boot 0.0"
 while :; do
     if ! kill -0 "$pid" 2>/dev/null; then
-        grep -q 'lsched: done' "$log" && break
+        grep -q "$m_done" "$log" && break
         fail "VM exited early"
     fi
     if grep -qE "$errors" "$log"; then
@@ -127,15 +148,15 @@ while :; do
     fi
     case $phase in
     boot) grep -q 'Booted up' "$log" && next_phase init "$t_init" ;;
-    init) grep -q 'lsched: loading' "$log" && next_phase load "$t_load" ;;
-    load) grep -q 'lsched: loaded' "$log" && next_phase run "$t_run" ;;
-    run)  grep -q 'lsched: done' "$log" && break ;;
+    init) grep -q "$m_init" "$log" && next_phase load "$t_load" ;;
+    load) grep -q "$m_load" "$log" && next_phase run "$t_run" ;;
+    run)  grep -q "$m_done" "$log" && break ;;
     esac
     over=$(awk -v s="$phase_start" -v n="$(date +%s.%N)" -v d="$deadline" 'BEGIN { print (n - s > d) }')
     [ "$over" = 1 ] && fail "deadline ${deadline}s missed"
     sleep 0.2
 done
-# teardown: errors after "lsched: done" count too; give the guest 3 s
+# teardown: errors after the done marker count too; give the guest 3 s
 next_phase teardown 3
 for _ in $(seq 15); do
     grep -qE "$errors" "$log" && fail "error in log"
