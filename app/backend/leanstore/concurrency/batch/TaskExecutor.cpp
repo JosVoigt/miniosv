@@ -197,6 +197,11 @@ void TaskExecutor::cycle()
 #ifndef NDEBUG
                waiting_tasks[task] = std::tuple(TaskState::WaitIo, getTimePoint(), false);
 #endif
+               // the I/O may already have completed while the task was still
+               // running (see Task::io_handoff); then it's ready right away.
+               if (task->io_handoff.fetch_add(1, std::memory_order_acq_rel) == 1) {
+                  moveReady(task);
+               }
                break;
             case TaskState::ReadyNoFreePages:
                COUNTERS_BLOCK() { leanstore::ThreadCounters::myCounters().exec_tasks_st_ready_mem++; }
@@ -282,6 +287,12 @@ void TaskExecutor::moveReady(Task* task)
    waitingTaskCount--;
    waitIoTaskCount--;
    tasks_io_done.push_back(task);
+}
+void TaskExecutor::ioDone(Task* task)
+{
+   if (task->io_handoff.fetch_add(1, std::memory_order_acq_rel) == 1) {
+      moveReady(task);  // the task has already parked in WaitIo
+   }
 }
 int TaskExecutor::taskCount()
 {

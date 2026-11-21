@@ -67,6 +67,11 @@ class Task
    // blocked in blockingIo waiting for a single read/write completion). Used to assert
    // a task is never resumed before its IO has actually completed.
    std::atomic<int> dbg_outstanding_ios{0};
+   // blockingIo handshake between the I/O completion and the executor parking
+   // the task. The completion runs in the NVMe MSI-X handler and can fire before
+   // the task has yielded (the doorbell is rung inside submit). Both sides
+   // fetch_add; whichever comes second makes the task ready (moveReady).
+   std::atomic<int> io_handoff{0};
    // -------------------------------------------------------------------------------------
    TaskState getState();
 };

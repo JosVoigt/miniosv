@@ -83,6 +83,8 @@ class TaskExecutor : public ThreadBase
    void pushTask(Task* task);
    void pushTask(TaskFunction fun);
    void moveReady(Task* task);
+   // blockingIo completion: see Task::io_handoff
+   void ioDone(Task* task);
    int taskCount();
    void sendMessage(int toId, MessageFunction fun, uintptr_t userData);
    // -------------------------------------------------------------------------------------

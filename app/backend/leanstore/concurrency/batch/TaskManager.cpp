@@ -373,13 +373,14 @@ void TaskManager::blockingIo(IoRequestType type, char* data, s64 addr, u64 len)
           auto this_executor = reinterpret_cast<TaskExecutor*>(req->user.user_data3.val.ptr);
           // std::cout << "completion addr: " << req->addr <<  std::endl << std::flush;
           assert(this_executor->id() == req->user.user_data.val.s);  //
-          this_executor->moveReady(this_task);
+          this_executor->ioDone(this_task);
           // TODO maybe push Task to top.
        },
    cb.user_data.val.s = TaskExecutor::localExec().id();
    cb.user_data3.val.ptr = &TaskExecutor::localExec();
    cb.user_data2.val.ptr = &TaskExecutor::localExec().currentTask();
 
+   TaskExecutor::localExec().currentTask().io_handoff.store(0, std::memory_order_relaxed);
    TaskExecutor::localExec().ioChannel.push(type, data, addr, len, cb);
    // TaskExecutor::localExec().ioChannel.submit();
    TaskExecutor::yieldCurrentTask(TaskState::WaitIo);
